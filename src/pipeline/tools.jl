@@ -394,9 +394,11 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         primers_mtime = mtime(primers_path)
         input_mtime   = isempty(raw_mtimes) ? primers_mtime : max(primers_mtime, maximum(raw_mtimes))
 
+        expected_trimmed = mode == "paired" ? 2 * length(selected_entries) : length(selected_entries)
         if isdir(cutadapt_dir)
             trimmed = filter(f -> endswith(f, "_trimmed.fastq.gz"), readdir(cutadapt_dir))
             if !isempty(trimmed) &&
+               length(trimmed) >= expected_trimmed &&
                !_section_stale(config_path, stage_sections(:cutadapt), hash_file) &&
                all(f -> mtime(joinpath(cutadapt_dir, f)) > input_mtime, trimmed) &&
                all(f -> filesize(joinpath(cutadapt_dir, f)) > 20, trimmed)

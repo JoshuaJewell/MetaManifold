@@ -65,8 +65,8 @@
     @testset "Constants" begin
         @test length(FuncDBAnnotation.FUNCDB_VALUE_COLS) == 8
         @test length(FuncDBAnnotation.FUNCDB_OUTPUT_COLS) == 8
-        @test FuncDBAnnotation.FUNCDB_OUTPUT_COLS[1] == "funcdb_function"
-        @test FuncDBAnnotation.FUNCDB_OUTPUT_COLS[end] == "funcdb_reference"
+        @test FuncDBAnnotation.FUNCDB_OUTPUT_COLS[1] == "function"
+        @test FuncDBAnnotation.FUNCDB_OUTPUT_COLS[end] == "reference"
         @test length(FuncDBAnnotation.RANK_HIERARCHY) == 7
         @test FuncDBAnnotation.RANK_HIERARCHY[1].rank == "species"
         @test FuncDBAnnotation.RANK_HIERARCHY[end].rank == "supergroup"
@@ -183,7 +183,7 @@
             )
             result = annotate_table(source, "VSEARCH", fpath)
 
-            @test result[1, "funcdb_match_rank"] == "unmatched"
+            @test result[1, "match_rank"] == "unmatched"
         end
     end
 
@@ -205,8 +205,8 @@
 
             result = annotate_table(source, "VSEARCH", fpath)
 
-            @test result[1, "funcdb_function"] == "saprotroph"
-            @test result[1, "funcdb_match_rank"] == "species"
+            @test result[1, "function"] == "saprotroph"
+            @test result[1, "match_rank"] == "species"
         end
     end
 
@@ -229,8 +229,8 @@
 
             result = annotate_table(source, "VSEARCH", fpath)
 
-            @test result[1, "funcdb_function"] == "saprotroph"
-            @test result[1, "funcdb_match_rank"] == "genus"
+            @test result[1, "function"] == "saprotroph"
+            @test result[1, "match_rank"] == "genus"
         end
     end
 
@@ -253,8 +253,8 @@
 
             result = annotate_table(source, "VSEARCH", fpath)
 
-            @test result[1, "funcdb_match_rank"] == "family"
-            @test result[1, "funcdb_function"] == "symbiotroph"
+            @test result[1, "match_rank"] == "family"
+            @test result[1, "function"] == "symbiotroph"
         end
     end
 
@@ -276,8 +276,8 @@
 
             result = annotate_table(source, "VSEARCH", fpath)
 
-            @test result[1, "funcdb_match_rank"] == "unmatched"
-            @test result[1, "funcdb_function"] == ""
+            @test result[1, "match_rank"] == "unmatched"
+            @test result[1, "function"] == ""
         end
     end
 
@@ -326,8 +326,60 @@
             @test !("Pident" in names(result))
             @test !("Species" in names(result))
             @test !("Genus" in names(result))
-            @test result[1, "funcdb_function"] == "symbiotroph"
-            @test result[1, "funcdb_match_rank"] == "species"
+            @test result[1, "function"] == "symbiotroph"
+            @test result[1, "match_rank"] == "species"
+        end
+    end
+
+    @testset "annotate_table VSEARCH - max_rank genus ignores and drops species" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            source = DataFrame(
+                SeqName     = ["seq1"],
+                Species     = ["Aspergillus_unknown"],
+                Genus       = ["Aspergillus"],
+                Family      = ["Aspergillaceae"],
+                Order       = ["Eurotiales"],
+                Class       = ["Eurotiomycetes"],
+                Division    = ["Ascomycota"],
+                Supergroup  = ["Opisthokonta"],
+            )
+
+            result = annotate_table(source, "VSEARCH", fpath; max_rank="genus")
+
+            @test !("Species" in names(result))
+            @test "Genus" in names(result)
+            @test result[1, "match_rank"] == "genus"
+        end
+    end
+
+    @testset "annotate_table DADA2 - max_rank genus drops species and species_boot" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            source = DataFrame(
+                SeqName        = ["seq1"],
+                Species_dada2  = ["Aspergillus_unknown"],
+                Genus_dada2    = ["Aspergillus"],
+                Family_dada2   = ["Aspergillaceae"],
+                Order_dada2    = ["Eurotiales"],
+                Class_dada2    = ["Eurotiomycetes"],
+                Division_dada2 = ["Ascomycota"],
+                Supergroup_dada2 = ["Opisthokonta"],
+                Species_boot   = [100],
+                Genus_boot     = [99],
+            )
+
+            result = annotate_table(source, "DADA2", fpath; max_rank="genus")
+
+            @test !("Species_dada2" in names(result))
+            @test !("Species_boot" in names(result))
+            @test "Genus_dada2" in names(result)
+            @test "Genus_boot" in names(result)
+            @test result[1, "match_rank"] == "genus"
         end
     end
 
@@ -347,13 +399,154 @@
             for col in FuncDBAnnotation.FUNCDB_OUTPUT_COLS
                 @test col in names(result)
             end
-            @test "funcdb_match_rank" in names(result)
+            @test "match_rank" in names(result)
+            @test "consensus_rank" in names(result)
+            @test "consensus_score" in names(result)
             @test "Contamination" in names(result)
+            @test "BLAST Assignment" in names(result)
             @test all(result.Contamination .== "unassigned")
+            @test all(result[!, "BLAST Assignment"] .== "")
             # Removed columns from old schema
             @test !("funcdb_taxonomy_source" in names(result))
             @test !("funcdb_matched_genus" in names(result))
             @test !("funcdb_matched_species" in names(result))
+        end
+    end
+
+    @testset "annotate_table - total columns from per-sample counts" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            source = DataFrame(
+                "SeqName"  => ["seq1", "seq2"],
+                "Species"  => ["Saccharomyces_cerevisiae", "NoMatch_sp."],
+                "Genus"    => ["Saccharomyces", "NoMatchGenus"],
+                "V4-C-01"  => [10, 0],
+                "V4-C-02"  => [5,  3],
+                "V4-L-01"  => [0,  7],
+                "V4-L-02"  => [2,  1],
+            )
+
+            result = annotate_table(source, "VSEARCH", fpath)
+
+            @test "total_C" in names(result)
+            @test "total_L" in names(result)
+            @test "total"   in names(result)
+            @test result[1, "total_C"] == 15
+            @test result[1, "total_L"] == 2
+            @test result[1, "total"]   == 17
+            @test result[2, "total_C"] == 3
+            @test result[2, "total_L"] == 8
+            @test result[2, "total"]   == 11
+        end
+    end
+
+    @testset "annotate_table - no sample columns -> no total columns" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            source = DataFrame(SeqName=["seq1"], Species=["x"], Genus=["y"])
+            result = annotate_table(source, "VSEARCH", fpath)
+
+            @test !("total" in names(result))
+        end
+    end
+
+    @testset "annotate_table - consensus_rank and consensus_score" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            # Source with both VSEARCH and DADA2 columns + Pident + 2 bootstrap cols
+            source = DataFrame(
+                SeqName        = ["seq1", "seq2", "seq3"],
+                Pident         = [98.0,    85.0,   70.0],
+                Species        = ["Saccharomyces_cerevisiae", "Aspergillus_niger", "Unknown"],
+                Genus          = ["Saccharomyces",            "Aspergillus",       "Unknown"],
+                Family         = ["Saccharomycetaceae",       "Aspergillaceae",    "UnknownFam"],
+                Order          = ["Saccharomycetales",        "Eurotiales",        "UnknownOrd"],
+                Class          = ["Saccharomycetes",          "Eurotiomycetes",    "UnknownCls"],
+                Division       = ["Ascomycota",               "Ascomycota",        "UnknownDiv"],
+                Supergroup     = ["Opisthokonta",             "Opisthokonta",      "UnknownSG"],
+                Species_dada2  = ["Saccharomyces_cerevisiae", "Aspergillus_OTHER", ""],
+                Genus_dada2    = ["Saccharomyces",            "Aspergillus",       ""],
+                Family_dada2   = ["Saccharomycetaceae",       "Aspergillaceae",    ""],
+                Order_dada2    = ["Saccharomycetales",        "Eurotiales",        ""],
+                Class_dada2    = ["Saccharomycetes",          "Eurotiomycetes",    ""],
+                Division_dada2 = ["Ascomycota",               "Ascomycota",        ""],
+                Supergroup_dada2 = ["Opisthokonta",           "Opisthokonta",      ""],
+                Species_boot   = [100,     60,     0],
+                Genus_boot     = [100,     90,     0],
+            )
+
+            result = annotate_table(source, "VSEARCH", fpath)
+
+            @test "consensus_rank"  in names(result)
+            @test "consensus_score" in names(result)
+
+            # 2 boot cols: Species_boot and Genus_boot
+
+            # seq1: consensus=species (idx 1), both boots contribute.
+            #   mean_boot = (100 + 100) / 2 = 100
+            #   score = (100/100) * (98/100) = 0.98
+            @test result[1, "consensus_rank"] == "species"
+            @test result[1, "consensus_score"] ≈ 0.98
+
+            # seq2: consensus=genus (idx 2), Species_boot finer -> 0.
+            #   mean_boot = (0 + 90) / 2 = 45
+            #   score = (45/100) * (85/100) = 0.3825
+            @test result[2, "consensus_rank"] == "genus"
+            @test result[2, "consensus_score"] ≈ 0.3825
+
+            # seq3: no consensus -> score is missing
+            @test result[3, "consensus_rank"] == ""
+            @test ismissing(result[3, "consensus_score"])
+        end
+    end
+
+    @testset "annotate_table - consensus_score with only Pident (no bootstrap)" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            source = DataFrame(
+                SeqName        = ["seq1"],
+                Pident         = [92.0],
+                Species        = ["Saccharomyces_cerevisiae"],
+                Genus          = ["Saccharomyces"],
+                Species_dada2  = ["Saccharomyces_cerevisiae"],
+                Genus_dada2    = ["Saccharomyces"],
+            )
+
+            result = annotate_table(source, "VSEARCH", fpath)
+
+            # No boot cols -> mean_boot defaults to 100, score = (100/100) * (92/100) = 0.92
+            @test result[1, "consensus_rank"] == "species"
+            @test result[1, "consensus_score"] ≈ 0.92
+        end
+    end
+
+    @testset "annotate_table - consensus_rank without DADA2 columns" begin
+        mktempdir() do dir
+            fpath = joinpath(dir, "FuncDB_species.csv")
+            _write_test_funcdb(fpath)
+
+            # Only VSEARCH columns - consensus should be empty, score missing
+            source = DataFrame(
+                SeqName    = ["seq1"],
+                Pident     = [99.0],
+                Species    = ["Saccharomyces_cerevisiae"],
+                Genus      = ["Saccharomyces"],
+            )
+
+            result = annotate_table(source, "VSEARCH", fpath)
+
+            @test "consensus_rank"  in names(result)
+            @test "consensus_score" in names(result)
+            @test result[1, "consensus_rank"] == ""
+            @test ismissing(result[1, "consensus_score"])
         end
     end
 
@@ -394,168 +587,6 @@
             # No taxonomy key at all
             @test_throws ErrorException append_funcdb_entry(fpath, Dict("Function" => "saprotroph"))
         end
-    end
-
-    @testset "apply_contamination_filter! - both empty to no change" begin
-        df = DataFrame(
-            funcdb_detailed_function   = ["saprotroph"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = ["soil"],
-            funcdb_environment         = ["terrestrial"],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}()
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "unassigned"
-    end
-
-    @testset "apply_contamination_filter! - blacklist hit to yes" begin
-        df = DataFrame(
-            funcdb_function            = ["symbiotroph"],
-            funcdb_detailed_function   = ["animal parasite"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = [""],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.blacklist.function" =>
-                (; value=["symbiotroph"], source="run"),
-            "annotation.contamination.blacklist.detailed_function" =>
-                (; value=["animal parasite", "plant parasite"], source="run"),
-            "annotation.contamination.blacklist.associated_organism" =>
-                (; value=[], source="default"),
-            "annotation.contamination.blacklist.associated_material" =>
-                (; value=[], source="default"),
-            "annotation.contamination.blacklist.environment" =>
-                (; value=[], source="default"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "yes"
-    end
-
-    @testset "apply_contamination_filter! - blacklist miss to unassigned" begin
-        df = DataFrame(
-            funcdb_function            = ["saprotroph"],
-            funcdb_detailed_function   = ["saprotroph"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = [""],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.blacklist.detailed_function" =>
-                (; value=["animal parasite"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "unassigned"
-    end
-
-    @testset "apply_contamination_filter! - whitelist hit to unassigned" begin
-        df = DataFrame(
-            funcdb_function            = ["saprotroph"],
-            funcdb_detailed_function   = ["saprotroph"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = ["clinical"],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.whitelist.environment" =>
-                (; value=["terrestrial", "marine"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "unassigned"
-    end
-
-    @testset "apply_contamination_filter! - whitelist hit to no" begin
-        df = DataFrame(
-            funcdb_function            = ["saprotroph"],
-            funcdb_detailed_function   = ["saprotroph"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = ["terrestrial"],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.whitelist.environment" =>
-                (; value=["terrestrial", "marine"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "no"
-    end
-
-    @testset "apply_contamination_filter! - blacklist + whitelist both active to unassigned" begin
-        df = DataFrame(
-            funcdb_function            = ["symbiotroph"],
-            funcdb_detailed_function   = ["saprotroph"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = ["grain"],
-            funcdb_environment         = ["terrestrial"],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.blacklist.function" =>
-                (; value=["symbiotroph"], source="run"),
-            "annotation.contamination.blacklist.associated_material" =>
-                (; value=["grain"], source="run"),
-            "annotation.contamination.whitelist.environment" =>
-                (; value=["terrestrial"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "unassigned"
-    end
-
-    @testset "apply_contamination_filter! - skips non-unassigned rows" begin
-        df = DataFrame(
-            funcdb_function            = ["symbiotroph", "saprotroph"],
-            funcdb_detailed_function   = ["animal parasite", "saprotroph"],
-            funcdb_associated_organism = ["", ""],
-            funcdb_associated_material = ["", ""],
-            funcdb_environment         = ["", ""],
-            Contamination              = ["no", "unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.blacklist.detailed_function" =>
-                (; value=["animal parasite", "saprotroph"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "no"
-        @test df[2, "Contamination"] == "yes"
-    end
-
-    @testset "apply_contamination_filter! - case-insensitive matching" begin
-        df = DataFrame(
-            funcdb_function            = ["Symbiotroph"],
-            funcdb_detailed_function   = ["Animal Parasite"],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = [""],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.blacklist.detailed_function" =>
-                (; value=["animal parasite"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "yes"
-    end
-
-    @testset "apply_contamination_filter! - non-contamination function match to no" begin
-        df = DataFrame(
-            funcdb_function            = ["saprotroph"],
-            funcdb_detailed_function   = [""],
-            funcdb_associated_organism = [""],
-            funcdb_associated_material = [""],
-            funcdb_environment         = [""],
-            Contamination              = ["unassigned"],
-        )
-        cfg = Dict{String,Any}(
-            "annotation.contamination.whitelist.function" =>
-                (; value=["saprotroph"], source="run"),
-        )
-        apply_contamination_filter!(df, cfg)
-        @test df[1, "Contamination"] == "no"
     end
 
 end

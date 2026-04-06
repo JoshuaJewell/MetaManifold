@@ -130,7 +130,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         paths = _cascade_paths(project.config_dir, project.data_study_dir, project.data_dir)
         source_paths = isfile(primers_path) ? vcat(paths, primers_path) : paths
         if !isfile(run_config_path) ||
-           any(p -> isfile(p) && mtime(p) > mtime(run_config_path), source_paths)
+           any(p -> isfile(p) && mtime(p) >= mtime(run_config_path), source_paths)
             merged = load_merged_config(paths)
             if isfile(primers_path)
                 primers = YAML.load_file(primers_path)
@@ -185,12 +185,16 @@ export _section_stale, _write_section_hash, _stale_keys,
     # Section can be a dotted path ("dada2.filter_trim") or a comma-separated
     # list of dotted paths ("dada2.dada,dada2.merge") whose canonical strings
     # are joined before hashing.
-    function _section_hash(config_path::String, section::String)::String
-        cfg = YAML.load_file(config_path)
-        cfg isa Dict || return bytes2hex(sha256(""))
+    function _section_hash(cfg::Dict, section::String)::String
         combined = join([_canonical(_get_nested(cfg, strip(s)))
                          for s in split(section, ",")], "|")
         bytes2hex(sha256(combined))
+    end
+
+    function _section_hash(config_path::String, section::String)::String
+        cfg = YAML.load_file(config_path)
+        cfg isa Dict || return bytes2hex(sha256(""))
+        _section_hash(cfg, section)
     end
 
     """

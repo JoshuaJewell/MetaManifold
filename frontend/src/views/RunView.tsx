@@ -1,9 +1,12 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useApi } from '../hooks/useApi'
-import { useJobRefetch } from '../hooks/useJobEvents'
+import { useAnalysis } from '../hooks/useAnalysis'
+import { useJobRefetch, useSSEConnected } from '../hooks/useJobEvents'
 import { api, apiUrl } from '../api/client'
-import { PipelineStages, CONFIG_DESCRIPTIONS, CONFIG_TYPES } from '../components/PipelineStages'
+import { errorMessage } from '../api/errorMessage'
+import { PipelineStages, StageConfig } from '../components/PipelineStages'
+import { AnalysisControls } from '../components/AnalysisControls'
 import { PlotlyChart } from '../components/PlotlyChart'
 import { DataTable } from '../components/DataTable'
 import { Skeleton } from '../components/Skeleton'
@@ -11,10 +14,12 @@ import { useToast } from '../components/Toast'
 import { NameDialog } from '../components/NameDialog'
 import { ComparisonPanel } from '../components/ComparisonPanel'
 import { AnnotationPanel } from '../components/AnnotationPanel'
-import type { TableMeta, TableQuery, ColFilter, FilterPreset, ConfigMap, ConfigSource, RunStages } from '../api/types'
+import { CompositionPanel } from '../components/CompositionPanel'
+import type { TableMeta, TableQuery, ColFilter, FilterPreset, ConfigMap, RunStages } from '../api/types'
 import type { RowPopupData, TableStats } from '../components/DataTable'
+import { discoverAnnotationOptions, type AnalysisOption } from '../components/annotationShared'
 
-type Tab = 'pipeline' | 'qc' | 'dada2' | 'tables' | 'annotation'
+type Tab = 'pipeline' | 'qc' | 'dada2' | 'tables' | 'annotation' | 'composition'
 
 // Maps tabs to the backend stages whose staleness should show a yellow dot
 const TAB_STALE_STAGES: Partial<Record<Tab, string[]>> = {
@@ -47,9 +52,10 @@ export function RunView({ runName }: { runName?: string } = {}) {
 
   const refetchOutputs = useCallback(() => {
     refetch()
+    refetchTables()
     refetchQc()
     refetchDada2()
-  }, [refetch, refetchQc, refetchDada2])
+  }, [refetch, refetchTables, refetchQc, refetchDada2])
 
   const handleConfigChanged = useCallback(() => {
     refetchConfig()
@@ -59,15 +65,16 @@ export function RunView({ runName }: { runName?: string } = {}) {
   const jobFilter = useMemo(() => ({ study: study!, run: run! }), [study, run])
   useJobRefetch(refetchOutputs, jobFilter)
 
-  // Polling fallback while any stage is running
+  // Polling fallback only when SSE is disconnected and a stage is running
+  const sseConnected = useSSEConnected()
   const hasRunning = runData
     ? Object.values(runData.stages ?? {}).some(s => (s as { status: string }).status === 'running')
     : false
   useEffect(() => {
-    if (!hasRunning) return
+    if (!hasRunning || sseConnected) return
     const id = setInterval(refetchOutputs, 3000)
     return () => clearInterval(id)
-  }, [hasRunning, refetchOutputs])
+  }, [hasRunning, sseConnected, refetchOutputs])
 
   const handleRunStage = async (stage: string) => {
     await api.pipeline.runStage(study!, run!, stage, group)
@@ -103,6 +110,18 @@ export function RunView({ runName }: { runName?: string } = {}) {
     })
   }
 
+  const tablesCacheKey = useMemo(() => {
+    if (!runData) return null
+    const stages = [
+      runData.stages.dada2_denoise,
+      runData.stages.dada2_classify,
+      runData.stages.swarm,
+      runData.stages.vsearch,
+      runData.stages.merge_taxa,
+    ]
+    return stages.map(s => `${s.status}:${s.last_run ?? ''}`).join('|')
+  }, [runData])
+
   return (
     <>
       <div className="page-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
@@ -135,12 +154,13 @@ export function RunView({ runName }: { runName?: string } = {}) {
       )}
 
       <div className="tabs">
-        {(['pipeline', 'qc', 'dada2', 'tables', 'annotation'] as Tab[]).map(t => {
+        {(['pipeline', 'qc', 'dada2', 'tables', 'annotation', 'composition'] as Tab[]).map(t => {
           const label = t === 'pipeline' ? 'Pipeline'
             : t === 'qc' ? 'QC'
             : t === 'dada2' ? 'DADA2'
             : t === 'tables' ? `Tables (${tables?.length ?? 0})`
-            : 'Annotation'
+            : t === 'annotation' ? 'Annotation'
+            : 'Composition'
           const stale = isTabStale(t)
           return (
             <button key={t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
@@ -169,8 +189,10 @@ export function RunView({ runName }: { runName?: string } = {}) {
 
       {tab === 'qc' && <QCPanel study={study!} run={run!} group={group} qcData={qcData ?? null} stages={runData?.stages ?? null} onRunStage={handleRunStage} configMap={configMap} cacheKey={runData?.stages?.fastqc?.last_run ?? null} />}
       {tab === 'dada2' && <DADA2Panel study={study!} run={run!} group={group} dada2Data={dada2Data ?? null} configMap={configMap ?? null} onConfigChanged={handleConfigChanged} stages={runData?.stages ?? null} onRunStage={handleRunStage} cacheKey={runData?.stages?.dada2_denoise?.last_run ?? null} />}
-      {tab === 'tables' && <TablesPanel study={study!} run={run!} group={group} tables={tables ?? []} onTablesChanged={refetchTables} />}
-      {tab === 'annotation' && <AnnotationPanel study={study!} run={run!} group={group} />}
+      {tab === 'tables' && <TablesPanel study={study!} run={run!} group={group} tables={tables ?? []} onTablesChanged={refetchTables} cacheKey={tablesCacheKey} />}
+      {tab === 'annotation' && <AnnotationPanel study={study!} run={run!} group={group} subgroups={runData?.subgroups} />}
+
+      {tab === 'composition' && <CompositionPanel study={study!} run={run!} group={group} subgroups={runData?.subgroups} />}
 
       {runData?.pooled && runData.subgroups.length >= 2 && (
         <ComparisonPanel
@@ -313,198 +335,7 @@ function StaleKeysBadge({ staleKeys, configMap }: { staleKeys: string[]; configM
   )
 }
 
-const SOURCE_COLORS: Record<ConfigSource, string> = {
-  default: 'var(--color-muted-fg)',
-  study:   '#e67700',
-  group:   '#5c940d',
-  run:     'var(--color-primary)',
-}
 
-function ConfigField({ dottedKey, leafKey, value, source, study, run, group, onChanged }: {
-  dottedKey: string
-  leafKey: string
-  value: unknown
-  source: ConfigSource
-  study: string
-  run: string
-  group?: string
-  onChanged: () => void
-}) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [saving, setSaving] = useState(false)
-  const toast = useToast()
-
-  const tooltip = CONFIG_DESCRIPTIONS[dottedKey]
-  const typeHint = CONFIG_TYPES[dottedKey]
-
-  const displayValue = Array.isArray(value) ? JSON.stringify(value)
-    : value === null || value === undefined ? 'null'
-    : typeof value === 'boolean' ? (value ? 'true' : 'false')
-    : typeof value === 'object' ? JSON.stringify(value)
-    : String(value)
-
-  const startEdit = () => {
-    if (typeHint?.kind === 'boolean' || typeHint?.kind === 'enum' || typeHint?.kind === 'multiselect') return
-    setDraft(typeof value === 'string' ? value : JSON.stringify(value))
-    setEditing(true)
-  }
-
-  const saveValue = async (newValue: unknown) => {
-    setSaving(true)
-    try {
-      await api.config.patchRun(study, run, { [dottedKey]: newValue }, group)
-      setEditing(false)
-      onChanged()
-    } catch (err) {
-      toast.error('Failed to save: ' + (err instanceof Error ? err.message : err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const save = async () => {
-    let parsed: unknown
-    try { parsed = JSON.parse(draft) } catch { parsed = draft }
-    await saveValue(parsed)
-  }
-
-  const remove = async () => {
-    setSaving(true)
-    try {
-      await api.config.deleteRun(study, run, dottedKey, group)
-      setEditing(false)
-      onChanged()
-    } catch (err) {
-      toast.error('Failed to remove: ' + (err instanceof Error ? err.message : err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const labelEl = <div style={{ minWidth: 100 }}>{leafKey.replace(/_/g, ' ')}</div>
-  const sourceEl = <span style={{ fontSize: '.68rem', fontWeight: 600, color: SOURCE_COLORS[source], textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{source}</span>
-  const removeBtn = source === 'run' && (
-    <button className="btn" style={{ padding: '0 4px', fontSize: '.68rem', lineHeight: 1 }} title="Remove run override"
-      onClick={e => { e.stopPropagation(); remove() }}>&times;</button>
-  )
-
-  if (typeHint?.kind === 'boolean') {
-    return (
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingLeft: 8 }} title={tooltip}>
-        {labelEl}
-        <input type="checkbox" checked={!!value} disabled={saving}
-          onChange={e => saveValue(e.target.checked)}
-          style={{ accentColor: 'var(--color-primary)' }} />
-        <span style={{ fontFamily: 'monospace', fontSize: '.78rem', flex: 1 }}>{value ? 'true' : 'false'}</span>
-        {sourceEl}{removeBtn}
-      </div>
-    )
-  }
-
-  if (typeHint?.kind === 'enum') {
-    const nullable = value === null || value === undefined
-    return (
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingLeft: 8 }} title={tooltip}>
-        {labelEl}
-        <select
-          value={nullable ? '' : String(value)}
-          disabled={saving}
-          onChange={e => saveValue(e.target.value || null)}
-          style={{ fontFamily: 'monospace', fontSize: '.78rem', padding: '1px 4px', border: '1px solid var(--color-border)', borderRadius: 3, background: 'var(--color-bg)' }}
-        >
-          {nullable && <option value="">null</option>}
-          {typeHint.options.map(o => <option key={o} value={o}>{o}</option>)}
-        </select>
-        <div style={{ flex: 1 }} />
-        {sourceEl}{removeBtn}
-      </div>
-    )
-  }
-
-  if (editing) {
-    const isNumeric = typeHint?.kind === 'int' || typeHint?.kind === 'float'
-    const nullable = isNumeric && typeHint.nullable
-    return (
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', paddingLeft: 8 }} title={tooltip}>
-        {labelEl}
-        {isNumeric ? (
-          <input
-            type="number"
-            style={{ width: 100, fontFamily: 'monospace', fontSize: '.78rem', padding: '2px 6px', border: '1px solid var(--color-border)', borderRadius: 3 }}
-            value={draft}
-            step={typeHint.kind === 'float' ? (typeHint.step ?? 0.01) : 1}
-            min={typeHint.kind === 'float' ? typeHint.min : undefined}
-            max={typeHint.kind === 'float' ? typeHint.max : undefined}
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            autoFocus disabled={saving}
-          />
-        ) : (
-          <input
-            style={{ flex: 1, fontFamily: 'monospace', fontSize: '.78rem', padding: '2px 6px', border: '1px solid var(--color-border)', borderRadius: 3 }}
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            autoFocus disabled={saving}
-          />
-        )}
-        {nullable && (
-          <button className="btn" style={{ padding: '1px 6px', fontSize: '.72rem' }}
-            onClick={() => saveValue(null)} disabled={saving}>null</button>
-        )}
-        <button className="btn" style={{ padding: '1px 6px', fontSize: '.72rem' }} onClick={save} disabled={saving}>Save</button>
-        <button className="btn" style={{ padding: '1px 6px', fontSize: '.72rem' }} onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingLeft: 8, cursor: 'pointer' }} onClick={startEdit} title={tooltip ?? 'Click to edit'}>
-      {labelEl}
-      <div style={{ fontFamily: 'monospace', flex: 1 }}>{displayValue}</div>
-      {sourceEl}{removeBtn}
-    </div>
-  )
-}
-
-function EditableConfigSection({ configMap, prefix, label, study, run, group, onConfigChanged }: {
-  configMap: ConfigMap
-  prefix: string
-  label: string
-  study: string
-  run: string
-  group?: string
-  onConfigChanged: () => void
-}) {
-  const entries = Object.entries(configMap)
-    .filter(([k]) => k.startsWith(prefix))
-    .map(([k, { value, source }]) => ({ dottedKey: k, leafKey: k.slice(prefix.length), value, source }))
-    .sort((a, b) => a.leafKey.localeCompare(b.leafKey))
-
-  if (entries.length === 0) return null
-
-  return (
-    <div style={{ fontSize: '.78rem', color: 'var(--color-muted-fg)', marginTop: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxWidth: 500 }}>
-        {entries.map(e => (
-          <ConfigField
-            key={e.dottedKey}
-            dottedKey={e.dottedKey}
-            leafKey={e.leafKey}
-            value={e.value}
-            source={e.source}
-            study={study}
-            run={run}
-            group={group}
-            onChanged={onConfigChanged}
-          />
-        ))}
-      </div>
-    </div>
-  )
-}
 
 function DADA2Panel({ study, run, group, dada2Data, configMap, onConfigChanged, stages, onRunStage, cacheKey }: {
   study: string; run: string; group?: string; dada2Data: DADA2Output | null
@@ -516,6 +347,12 @@ function DADA2Panel({ study, run, group, dada2Data, configMap, onConfigChanged, 
   const [statsData, setStatsData] = useState<{ columns: string[]; rows: Record<string, unknown>[] } | null>(null)
   const [expandedLog, setExpandedLog] = useState<string | null>(null)
   const [logContent, setLogContent] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    setStatsData(null)
+    setExpandedLog(null)
+    setLogContent({})
+  }, [cacheKey])
 
   // Auto-select earliest stale sub-tab, or default to 'quality'
   const denoiseStaleKeys = stages?.dada2_denoise?.stale_keys ?? []
@@ -664,11 +501,10 @@ function DADA2Panel({ study, run, group, dada2Data, configMap, onConfigChanged, 
 
         {/* Config strips */}
         {configMap && configSections.map(sec => (
-          <EditableConfigSection
+          <StageConfig
             key={sec.prefix}
             configMap={configMap}
-            prefix={sec.prefix}
-            label={sec.label}
+            prefixes={[sec.prefix]}
             study={study}
             run={run}
             group={group}
@@ -717,7 +553,7 @@ function DADA2Panel({ study, run, group, dada2Data, configMap, onConfigChanged, 
   )
 }
 
-function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: string; run: string; group?: string; tables: TableMeta[]; onTablesChanged: () => void }) {
+function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: { study: string; run: string; group?: string; tables: TableMeta[]; onTablesChanged: () => void; cacheKey?: string | null }) {
   const [selected, setSelected] = useState<string | null>(tables[0]?.id ?? null)
 
   useEffect(() => {
@@ -789,7 +625,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
         setFilters(parsed)
         setFilterKey(k => k + 1)
       } catch (err) {
-        toast.error('Failed to parse filter YAML: ' + (err instanceof Error ? err.message : err))
+        toast.error('Failed to parse filter YAML: ' + (errorMessage(err)))
       }
     }
     reader.readAsText(file)
@@ -812,7 +648,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       setFilters(newFilters)
       setFilterKey(k => k + 1)
     } catch (err) {
-      toast.error('Failed to apply preset: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to apply preset: ' + (errorMessage(err)))
     } finally {
       setLoadingPreset(false)
     }
@@ -826,7 +662,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       await api.presets.save(name, filters, `Saved from table ${selected}`)
       reloadPresets()
     } catch (err) {
-      toast.error('Failed to save filters: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to save filters: ' + (errorMessage(err)))
     } finally {
       setSaving(false)
     }
@@ -842,7 +678,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       onTablesChanged()
       toast.success(`Saved ${result.rows} rows to ${result.name}.csv`)
     } catch (err) {
-      toast.error('Failed to save table: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to save table: ' + (errorMessage(err)))
     } finally {
       setSaving(false)
     }
@@ -855,7 +691,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       if (selected === id) setSelected(tables.find(t => t.id !== id)?.id ?? null)
       onTablesChanged()
     } catch (err) {
-      toast.error('Failed to delete table: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to delete table: ' + (errorMessage(err)))
     }
   }
 
@@ -865,7 +701,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       await api.presets.delete(preset.file)
       reloadPresets()
     } catch (err) {
-      toast.error('Failed to delete preset: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to delete preset: ' + (errorMessage(err)))
     }
   }
 
@@ -874,7 +710,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
       await api.results.exportTable(study, run, selected!,
         filters, sortBy ?? undefined, sortDir, group)
     } catch (err) {
-      toast.error('Failed to export table: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to export table: ' + (errorMessage(err)))
     }
   }
 
@@ -996,7 +832,9 @@ function TablesPanel({ study, run, group, tables, onTablesChanged }: { study: st
         <>
           <DataTable
             key={filterKey}
+            storageKey={`tbl:${study}/${run}/${group ?? ''}/${selected}`}
             fetcher={fetcher}
+            refreshKey={cacheKey}
             distinctFetcher={distinctFetcher}
             rowPopupFetcher={selected === 'merged_otu' ? otuPopupFetcher : undefined}
             popupColumns={selected === 'merged_otu' ? mergedColumns : undefined}
@@ -1021,72 +859,50 @@ function AnalysisPanel({ study, run, group, table, filters }: {
   study: string; run: string; group?: string; table: string
   filters: Record<string, ColFilter>
 }) {
-  const [alphaFig, setAlphaFig] = useState<unknown>(null)
-  const [taxaFig, setTaxaFig]   = useState<unknown>(null)
-  const [ranks, setRanks]       = useState<string[]>([])
-  const [rank, setRank]         = useState<string | null>(null)
-  const [relative, setRelative] = useState(true)
-  const [loading, setLoading]   = useState(false)
-  const toast = useToast()
+  const [analysisTables, setAnalysisTables] = useState<AnalysisOption[]>([])
+  const [analysisKey, setAnalysisKey] = useState<string | null>(null)
 
   useEffect(() => {
-    api.analysis.ranks(study, run, group).then(setRanks).catch(() => {})
-  }, [study, run, group])
+    let cancelled = false
+    discoverAnnotationOptions(study, run, group).then(options => {
+      if (cancelled) return
+      setAnalysisTables(options)
+      const preferred = options.find(o => o.table === table) ?? options[0] ?? null
+      setAnalysisKey(current => current && options.some(o => o.key === current) ? current : preferred?.key ?? null)
+    })
+    return () => { cancelled = true }
+  }, [study, run, group, table])
 
-  useEffect(() => {
-    if (ranks.length > 0 && !rank) setRank(ranks[ranks.length - 1])
-  }, [ranks])
+  const selectedAnalysis = useMemo(
+    () => analysisTables.find(option => option.key === analysisKey) ?? null,
+    [analysisTables, analysisKey],
+  )
 
-  const body = useMemo(() => ({ table, colFilters: filters }), [table, filters])
+  const analysis = useAnalysis({
+    study, run, group,
+    table: selectedAnalysis?.table ?? null,
+    source: selectedAnalysis?.source,
+    colFilters: filters,
+  })
 
-  const runAlpha = async () => {
-    setLoading(true)
-    try {
-      setAlphaFig(await api.analysis.alpha(study, run, body, group))
-    } catch (err) {
-      toast.error('Alpha analysis failed: ' + (err instanceof Error ? err.message : err))
-    } finally { setLoading(false) }
-  }
+  const body = selectedAnalysis ? { table: selectedAnalysis.table, source: selectedAnalysis.source, colFilters: filters } : null
 
-  const runTaxaBar = async () => {
-    if (!rank) return
-    setLoading(true)
-    try {
-      setTaxaFig(await api.analysis.taxaBar(study, run,
-        { ...body, rank, top_n: 15, relative }, group))
-    } catch (err) {
-      toast.error('Taxa bar failed: ' + (err instanceof Error ? err.message : err))
-    } finally { setLoading(false) }
-  }
+  const tableSelector = analysisTables.length > 1 ? (
+    <select value={analysisKey ?? ''} onChange={e => setAnalysisKey(e.target.value)}
+      style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--color-border)',
+               fontSize: '.82rem', background: 'var(--color-bg)' }}>
+      {analysisTables.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}
+    </select>
+  ) : analysisTables.length === 1 ? (
+    <code>{analysisTables[0].label}</code>
+  ) : (
+    <span style={{ fontSize: '.82rem', color: 'var(--color-muted-fg)' }}>No annotated tables available</span>
+  )
 
   return (
-    <div style={{ marginTop: 24 }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-        <button className="btn" onClick={runAlpha} disabled={loading}>
-          {loading ? 'Computing...' : 'Alpha Diversity'}
-        </button>
-
-        {ranks.length > 0 && (
-          <>
-            <select value={rank ?? ''} onChange={e => setRank(e.target.value)}
-              style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--color-border)',
-                       fontSize: '.82rem', background: 'var(--color-bg)' }}>
-              {ranks.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-            <label style={{ fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <input type="checkbox" checked={relative} onChange={e => setRelative(e.target.checked)} />
-              Relative
-            </label>
-            <button className="btn" onClick={runTaxaBar} disabled={loading || !rank}>
-              Taxa Bar
-            </button>
-          </>
-        )}
-      </div>
-
-      {alphaFig != null && <PlotlyChart figure={alphaFig} />}
-      {taxaFig != null && <PlotlyChart figure={taxaFig} />}
-    </div>
+    <AnalysisControls {...analysis} body={body}>
+      {tableSelector}
+    </AnalysisControls>
   )
 }
 
@@ -1100,7 +916,7 @@ function PipelineStatsChart({ study, run, group }: { study: string; run: string;
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="card-title">Pipeline Stats</div>
-      <PlotlyChart figure={figure} />
+      <PlotlyChart figure={figure} heightRatio={0.2} />
     </div>
   )
 }

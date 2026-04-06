@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { errorMessage } from '../api/errorMessage'
 
 interface Props {
   title: string
@@ -26,7 +27,7 @@ export function NameDialog({ title, initialValue = '', placeholder = 'Name', onC
     try {
       await onConfirm(value.trim())
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Unknown error')
+      setError(errorMessage(err))
       setBusy(false)
     }
   }

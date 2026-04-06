@@ -2,11 +2,16 @@
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 import type { CSSProperties } from 'react'
-import type { AnnotationSource } from '../api/types'
+import type { AnnotationMeta, AnnotationSource, ConfigSource } from '../api/types'
+import { api } from '../api/client'
 
 export type ContamStatus = 'unassigned' | 'yes' | 'no'
 
+
 export const SOURCES: AnnotationSource[] = ['VSEARCH', 'DADA2']
+
+/** Ranks ordered from finest to coarsest. */
+export const RANK_ORDER = ['species', 'genus', 'family', 'order', 'class', 'division', 'supergroup'] as const
 
 export const RANK_COL: Record<string, Record<AnnotationSource, string>> = {
   species:    { VSEARCH: 'Species',    DADA2: 'Species_dada2' },
@@ -18,19 +23,40 @@ export const RANK_COL: Record<string, Record<AnnotationSource, string>> = {
   supergroup: { VSEARCH: 'Supergroup', DADA2: 'Supergroup_dada2' },
 }
 
+/**
+ * Find the finest rank that has a non-empty value in the row, starting from
+ * `startRank` and walking coarser. Returns the rank name or null.
+ */
+export function findFinestRank(
+  row: Record<string, unknown>,
+  source: AnnotationSource,
+  startRank: string = RANK_ORDER[0],
+): string | null {
+  const startIdx = RANK_ORDER.indexOf(startRank as typeof RANK_ORDER[number])
+  const from = startIdx >= 0 ? startIdx : 0
+  for (let i = from; i < RANK_ORDER.length; i++) {
+    const rank = RANK_ORDER[i]
+    const col = RANK_COL[rank]?.[source]
+    if (col && row[col] != null && String(row[col]).trim() !== '') return rank
+  }
+  return null
+}
+
+export const SOURCE_COLORS: Record<ConfigSource, string> = {
+  default: 'var(--color-muted-fg)',
+  study:   '#e67700',
+  group:   '#5c940d',
+  run:     'var(--color-primary)',
+}
+
+export const BLAST_ASSIGNMENT_COLUMN = 'BLAST Assignment'
+
 export const CONTAM_STYLE: Record<ContamStatus, CSSProperties> = {
   unassigned: { color: 'var(--color-muted-fg)' },
   yes:        { color: '#c92a2a', fontWeight: 600 },
   no:         { color: '#2b8a3e', fontWeight: 600 },
 }
 
-export const CONTAM_FILTER_FIELDS: Array<{ key: string; label: string }> = [
-  { key: 'function', label: 'Function' },
-  { key: 'detailed_function', label: 'Detailed function' },
-  { key: 'associated_organism', label: 'Assoc. organism' },
-  { key: 'associated_material', label: 'Assoc. material' },
-  { key: 'environment', label: 'Environment' },
-]
 
 export const FUNCDB_FIELDS = [
   { key: 'Domain',                   label: 'Domain',                   required: false },
@@ -59,7 +85,7 @@ export function prefillFromRow(row: Record<string, unknown>, source: AnnotationS
   const taxMap: Array<[string, string]> = source === 'VSEARCH'
     ? [['Domain', 'Domain'], ['Supergroup', 'supergroup'], ['Division', 'division'], ['Class', 'class'],
        ['Order', 'order'], ['Family', 'family'], ['Genus', 'Genus'], ['Species', 'Species']]
-    : [['Supergroup_dada2', 'supergroup'], ['Division_dada2', 'division'], ['Class_dada2', 'class'],
+    : [['Domain_dada2', 'Domain'], ['Supergroup_dada2', 'supergroup'], ['Division_dada2', 'division'], ['Class_dada2', 'class'],
        ['Order_dada2', 'order'], ['Family_dada2', 'family'], ['Genus_dada2', 'Genus'], ['Species_dada2', 'Species']]
 
   for (const [src, dest] of taxMap) {
@@ -68,14 +94,14 @@ export function prefillFromRow(row: Record<string, unknown>, source: AnnotationS
   }
 
   const valueMap: Array<[string, string]> = [
-    ['funcdb_function', 'Function'],
-    ['funcdb_detailed_function', 'Detailed_function'],
-    ['funcdb_associated_organism', 'Associated_organism'],
-    ['funcdb_associated_material', 'Associated_material'],
-    ['funcdb_environment', 'Environment'],
-    ['funcdb_potential_human_pathogen', 'Potential_human_pathogen'],
-    ['funcdb_comment', 'Comment'],
-    ['funcdb_reference', 'Reference'],
+    ['function', 'Function'],
+    ['detailed_function', 'Detailed_function'],
+    ['assoc_organism', 'Associated_organism'],
+    ['assoc_material', 'Associated_material'],
+    ['environment', 'Environment'],
+    ['human_pathogen', 'Potential_human_pathogen'],
+    ['comment', 'Comment'],
+    ['reference', 'Reference'],
   ]
 
   for (const [src, dest] of valueMap) {
@@ -83,8 +109,36 @@ export function prefillFromRow(row: Record<string, unknown>, source: AnnotationS
     if (v) result[dest] = v
   }
 
-  const rank = str(row.funcdb_match_rank)
+  const rank = str(row.match_rank)
   if (rank && rank !== 'unmatched') result.Assignment_level = rank
 
   return result
+}
+
+export interface AnalysisOption {
+  key: string
+  table: string
+  source: AnnotationSource
+  label: string
+}
+
+/** Discover annotated tables available for a single run. */
+export async function discoverAnnotationOptions(
+  study: string, run: string, group?: string | null,
+): Promise<AnalysisOption[]> {
+  const listings = await Promise.all(
+    SOURCES.map(source =>
+      api.annotations.list(study, run, source, group).catch(() => [] as AnnotationMeta[]),
+    ),
+  )
+  return listings
+    .flat()
+    .filter(meta => meta.status === 'fresh' || meta.status === 'stale')
+    .map(meta => ({
+      key: `${meta.source}:${meta.table}`,
+      table: meta.table,
+      source: meta.source,
+      label: `${meta.table} (${meta.source})`,
+    }))
+    .sort((a, b) => a.table !== b.table ? a.table.localeCompare(b.table) : a.source.localeCompare(b.source))
 }

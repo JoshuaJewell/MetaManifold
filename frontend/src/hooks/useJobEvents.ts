@@ -23,6 +23,11 @@ export function createJobEventBus(): JobEventBus {
 }
 
 export const JobEventContext = createContext<JobEventBus | null>(null)
+export const SSEConnectedContext = createContext<boolean>(false)
+
+export function useSSEConnected(): boolean {
+  return useContext(SSEConnectedContext)
+}
 
 /**
  * Refetch when a job matching the filter completes (or fails).

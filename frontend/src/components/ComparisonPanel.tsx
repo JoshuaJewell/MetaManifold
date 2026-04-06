@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { errorMessage } from '../api/errorMessage'
 import { PlotlyChart } from './PlotlyChart'
 import { useToast } from './Toast'
+import { discoverAnnotationOptions, type AnalysisOption } from './annotationShared'
 import type { ComparisonRunSpec, ColFilter, PermanovaResult } from '../api/types'
 
 export function ComparisonPanel({ study, runs }: {
@@ -13,8 +15,8 @@ export function ComparisonPanel({ study, runs }: {
   const [nmdsFig, setNmdsFig]         = useState<unknown>(null)
   const [permanova, setPermanova]     = useState<PermanovaResult | null>(null)
   const [loading, setLoading]         = useState<string | null>(null)
-  const [tables, setTables]           = useState<string[]>([])
-  const [table, setTable]             = useState('merged')
+  const [options, setOptions]         = useState<AnalysisOption[]>([])
+  const [analysisKey, setAnalysisKey] = useState<string | null>(null)
   const [rAvailable, setRAvailable]   = useState<boolean | null>(null)
 
   useEffect(() => {
@@ -23,7 +25,7 @@ export function ComparisonPanel({ study, runs }: {
 
   const isSubgroupMode = runs.length > 0 && runs.every(r => r.prefix)
 
-  // Discover tables available across the selected runs (deduplicate by run+group)
+  // Discover annotated source/table pairs available across all selected runs.
   useEffect(() => {
     let cancelled = false
     const seen = new Set<string>()
@@ -33,23 +35,34 @@ export function ComparisonPanel({ study, runs }: {
       seen.add(key)
       return true
     })
-    Promise.all(
-      unique.map(r => api.results.runTables(study, r.run, r.group).catch(() => []))
-    ).then(results => {
-      if (cancelled) return
-      // Union of all table IDs
-      const ids = new Set<string>()
-      for (const metas of results) for (const m of metas) ids.add(m.id)
-      const sorted = [...ids].sort((a, b) => a === 'merged' ? -1 : b === 'merged' ? 1 : a.localeCompare(b))
-      setTables(sorted)
-      if (sorted.length > 0 && !sorted.includes(table)) setTable(sorted[0])
-    })
+    Promise.all(unique.map(r => discoverAnnotationOptions(study, r.run, r.group)))
+      .then(results => {
+        if (cancelled) return
+        // Intersect: keep only options present in ALL runs
+        const shared = new Map<string, AnalysisOption>()
+        results.forEach((opts, index) => {
+          const keys = new Set(opts.map(o => o.key))
+          if (index === 0) {
+            for (const o of opts) shared.set(o.key, o)
+          } else {
+            for (const key of [...shared.keys()]) {
+              if (!keys.has(key)) shared.delete(key)
+            }
+          }
+        })
+        const sorted = [...shared.values()].sort((a, b) =>
+          a.table !== b.table ? a.table.localeCompare(b.table) : a.source.localeCompare(b.source))
+        setOptions(sorted)
+        setAnalysisKey(current => current && sorted.some(o => o.key === current) ? current : sorted[0]?.key ?? null)
+      })
     return () => { cancelled = true }
-  }, [study, runs, table])
+  }, [study, runs])
 
-  const body = { table, runs, colFilters: {} as Record<string, ColFilter> }
+  const selected = options.find(option => option.key === analysisKey) ?? null
+  const body = selected ? { table: selected.table, source: selected.source, runs: runs.map(run => ({ ...run, source: selected.source })), colFilters: {} as Record<string, ColFilter> } : null
 
   const run = async (type: 'alpha' | 'nmds' | 'permanova') => {
+    if (!body) return
     setLoading(type)
     try {
       if (type === 'alpha') {
@@ -60,7 +73,7 @@ export function ComparisonPanel({ study, runs }: {
         setPermanova(await api.analysis.permanova(study, body))
       }
     } catch (err) {
-      toast.error(`${type} failed: ${err instanceof Error ? err.message : err}`)
+      toast.error(`${type} failed: ${errorMessage(err)}`)
     } finally {
       setLoading(null)
     }
@@ -75,37 +88,39 @@ export function ComparisonPanel({ study, runs }: {
       </h2>
       <p style={{ fontSize: '.82rem', color: 'var(--color-muted-fg)', marginBottom: 12 }}>
         Comparing {runs.length} {isSubgroupMode ? 'groups' : 'runs'} on the{' '}
-        {tables.length > 1 ? (
+        {options.length > 1 ? (
           <select
-            value={table}
-            onChange={e => setTable(e.target.value)}
+            value={analysisKey ?? ''}
+            onChange={e => setAnalysisKey(e.target.value)}
             style={{ font: 'inherit', padding: '1px 4px', verticalAlign: 'baseline' }}
           >
-            {tables.map(t => <option key={t} value={t}>{t}</option>)}
+            {options.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}
           </select>
+        ) : options.length === 1 ? (
+          <code>{options[0].label}</code>
         ) : (
-          <code>{table}</code>
+          <span>no shared annotated table</span>
         )}
-        {' '}table
+        {' '}dataset
       </p>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-        <button className="btn" onClick={() => run('alpha')} disabled={loading !== null}>
+        <button className="btn" onClick={() => run('alpha')} disabled={loading !== null || !body}>
           {loading === 'alpha' ? 'Computing...' : 'Alpha Comparison'}
         </button>
         {rAvailable && (
-          <button className="btn" onClick={() => run('nmds')} disabled={loading !== null}>
+          <button className="btn" onClick={() => run('nmds')} disabled={loading !== null || !body}>
             {loading === 'nmds' ? 'Computing...' : 'NMDS'}
           </button>
         )}
         {rAvailable && (
-          <button className="btn" onClick={() => run('permanova')} disabled={loading !== null}>
+          <button className="btn" onClick={() => run('permanova')} disabled={loading !== null || !body}>
             {loading === 'permanova' ? 'Computing...' : 'PERMANOVA'}
           </button>
         )}
       </div>
 
-      {alphaFig != null && <PlotlyChart figure={alphaFig} />}
-      {nmdsFig != null && <PlotlyChart figure={nmdsFig} />}
+      {alphaFig != null && <PlotlyChart figure={alphaFig} heightRatio={0.48} />}
+      {nmdsFig != null && <PlotlyChart figure={nmdsFig} heightRatio={0.48} />}
       {permanova && (
         <div className="card" style={{ fontFamily: 'monospace', fontSize: '.82rem', whiteSpace: 'pre-wrap' }}>
           <div className="card-title">PERMANOVA Results</div>

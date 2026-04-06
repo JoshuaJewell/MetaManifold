@@ -6,8 +6,9 @@ module Analysis
 using DataFrames, JSON3, DuckDB, DBInterface, RCall
 using ..DiversityMetrics: richness, shannon, simpson
 
-export sample_columns, filtered_counts, filtered_df, taxonomy_levels,
+export sample_columns, filtered_counts, filtered_df, taxonomy_levels, taxon_column,
        aggregate_by_taxon, combined_counts_across_runs, combined_asv_counts_across_runs,
+       sequence_column_name, relativize_rows!,
        alpha_chart, taxa_bar_chart, pipeline_stats_chart,
        alpha_boxplot, nmds_chart,
        run_nmds, run_permanova, r_available
@@ -44,9 +45,25 @@ function sample_columns(con, table::String)
 end
 
 """
+    sequence_column_name(columns) -> Union{String, Nothing}
+
+Resolve the DNA sequence column name from a table schema. Some imported CSVs
+preserve the original DADA2 `Sequence` header while later pipeline stages use
+lowercase `sequence`.
+"""
+function sequence_column_name(columns)::Union{String,Nothing}
+    for col in columns
+        lowercase(col) == "sequence" && return col
+    end
+    nothing
+end
+
+"""
     taxonomy_levels(con, table) -> Vector{String}
 
-Detect which taxonomy rank columns exist in the table.
+Detect which taxonomy rank columns exist in the table, returning canonical rank names
+(without suffix). Recognises both plain names (VSEARCH: "Genus") and DADA2-suffixed
+names ("Genus_dada2"), so the same rank list is returned for either annotation source.
 """
 function taxonomy_levels(con, table::String)
     result = DataFrame(DBInterface.execute(con,
@@ -56,7 +73,22 @@ function taxonomy_levels(con, table::String)
         "Domain", "Supergroup", "Division", "Subdivision",
         "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species",
     ]
-    filter(r -> r in existing, known_ranks)
+    filter(r -> r in existing || (r * "_dada2") in existing, known_ranks)
+end
+
+"""
+    taxon_column(columns, rank) -> String
+
+Resolve a canonical rank name (e.g. "Genus") to the actual column name present in
+the table. Checks for the plain name first (VSEARCH), then the DADA2-suffixed variant.
+Falls back to the plain name if neither is found (SQL will error explicitly).
+"""
+function taxon_column(columns::Union{Vector{String}, AbstractSet{String}}, rank::String)
+    col_set = columns isa AbstractSet ? columns : Set(columns)
+    rank in col_set && return rank
+    dada2 = rank * "_dada2"
+    dada2 in col_set && return dada2
+    rank
 end
 
 """
@@ -254,7 +286,7 @@ function alpha_chart(sample_names::Vector{String},
     traces = [Dict{String,Any}(
         "type" => "bar", "x" => sample_names, "y" => vals,
         "xaxis" => xax, "yaxis" => yax,
-        "showlegend" => false, "marker" => Dict("colour" => colour),
+        "showlegend" => false, "marker" => Dict("color" => colour),
     ) for (yax, xax, _, vals) in metrics]
 
     layout = Dict{String,Any}(
@@ -313,7 +345,7 @@ function taxa_bar_chart(taxon_labels::Vector{String},
     traces = [Dict{String,Any}(
         "type" => "bar", "name" => final_labels[i],
         "x" => sample_names, "y" => collect(counts[i, :]),
-        "marker" => Dict("colour" => colours[i]),
+        "marker" => Dict("color" => colours[i]),
     ) for i in 1:n_final]
 
     layout = Dict{String,Any}(
@@ -357,7 +389,7 @@ function pipeline_stats_chart(stats_df::DataFrame)
         "x" => stage_labels,
         "y" => [let v = stats_df[si, Symbol(c)]; ismissing(v) ? 0.0 : Float64(v) end
                 for c in stage_cols],
-        "marker" => Dict("colour" => colours[si]),
+        "marker" => Dict("color" => colours[si]),
     ) for si in eachindex(sample_names)]
 
     layout = Dict{String,Any}(

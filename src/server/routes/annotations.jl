@@ -6,14 +6,39 @@
 
 using JSON3, CSV, DataFrames, OrderedCollections, DuckDB, DBInterface, Dates
 
-include(joinpath(@__DIR__, "duckdb_helpers.jl"))
-
 const FUNCDB_PATH = joinpath(dirname(dirname(dirname(@__DIR__))), "databases", "FuncDB_species.csv")
+const BLAST_ASSIGNMENT_COLUMN = "BLAST Assignment"
 
-const _ANNOTATION_REQUIRED_COLS = Dict(
-    "VSEARCH" => ("Species", "Genus"),
-    "DADA2"   => ("Species_dada2", "Genus_dada2"),
-)
+function _annotation_max_rank(study::String, run::String;
+                              group::Union{String,Nothing}=nothing)
+    cfg = _resolve_config(study, run, group)
+    raw = get(get(cfg, "annotation.max_rank", (; value="species", source="default")), :value, "species")
+    value = lowercase(strip(string(raw)))
+    value in FuncDBAnnotation._SUPPORTED_MAX_RANKS || return nothing
+    value
+end
+
+_annotation_required_col(source::String, max_rank::String) =
+    _matched_taxon_column(source, max_rank)
+
+"""
+    _require_max_rank_col(study, run, source; group) -> (max_rank, required_col) or HTTP error response
+
+Validate annotation.max_rank config and resolve the required taxonomy column.
+Returns an HTTP error response on failure.
+"""
+function _require_max_rank_col(study::String, run::String, source::String;
+                               group::Union{String,Nothing}=nothing)
+    max_rank = _annotation_max_rank(study, run; group)
+    isnothing(max_rank) && return json_error(400, "invalid_annotation_max_rank",
+        "annotation.max_rank must be one of species, genus, family, order, class, division, or supergroup")
+
+    required_col = _annotation_required_col(source, max_rank)
+    isnothing(required_col) && return json_error(400, "invalid_annotation_max_rank",
+        "No taxonomy column mapping exists for annotation.max_rank='$max_rank'")
+
+    (max_rank, required_col)
+end
 
 function _validate_source(source::String)
     source in ("VSEARCH", "DADA2") || return false
@@ -46,50 +71,78 @@ function _with_annotation_db(f, study::String, run::String, source::String;
     isfile(ann_db_path) || return json_error(404, "no_annotations",
                                              "No annotation database found for $source")
 
-    db = DuckDB.DB(ann_db_path; readonly)
-    con = DBInterface.connect(db)
     try
-        f(con)
-    finally
-        DBInterface.close!(con)
-        close(db)
+        db = DuckDB.DB(ann_db_path; readonly)
+        con = DBInterface.connect(db)
+        try
+            f(con)
+        finally
+            DBInterface.close!(con)
+            close(db)
+        end
+    catch e
+        # Attempt to rebuild a corrupt DB from CSV files.
+        ann_dir = _annotation_dir(study, run, source; group)
+        csvs = filter(f -> endswith(f, ".csv"), readdir(ann_dir; join=true))
+        isempty(csvs) && rethrow()
+        @warn "Annotation DB corrupt, rebuilding from CSV" ann_db_path exception=(e, catch_backtrace())
+        rm(ann_db_path; force=true)
+        db = DuckDB.DB(ann_db_path)
+        con = DBInterface.connect(db)
+        try
+            for csv_path in csvs
+                tname = basename(csv_path)[1:end-4]
+                DBInterface.execute(con,
+                    "CREATE OR REPLACE TABLE \"$(tname)\" AS SELECT * FROM read_csv_auto('$(csv_path)', auto_detect=true, types={'Contamination': 'VARCHAR', '$(BLAST_ASSIGNMENT_COLUMN)': 'VARCHAR'})")
+            end
+        finally
+            DBInterface.close!(con)
+            close(db)
+        end
+        # Retry the original operation with the rebuilt DB.
+        db = DuckDB.DB(ann_db_path; readonly)
+        con = DBInterface.connect(db)
+        try
+            f(con)
+        finally
+            DBInterface.close!(con)
+            close(db)
+        end
     end
 end
 
-function _annotation_status(csv_path::String, merged_csv_path::String, funcdb_path::String)
+function _annotation_status(csv_path::String, merged_csv_path::String, funcdb_path::String;
+                            config_paths::Vector{String}=String[])
     isfile(csv_path) || return "missing"
     ann_mtime = mtime(csv_path)
     merged_mtime = isfile(merged_csv_path) ? mtime(merged_csv_path) : 0.0
     funcdb_mtime = isfile(funcdb_path) ? mtime(funcdb_path) : 0.0
-    (ann_mtime < merged_mtime || ann_mtime < funcdb_mtime) ? "stale" : "fresh"
+    (ann_mtime < merged_mtime || ann_mtime < funcdb_mtime) && return "stale"
+    for cp in config_paths
+        isfile(cp) && mtime(cp) > ann_mtime && return "stale"
+    end
+    "fresh"
 end
 
 function _contamination_stats(con, table::String)
+    df = DataFrame(DBInterface.execute(con, "SELECT * FROM \"$table\""))
     count_cols = _sample_count_columns(con, table)
-    sum_expr = isempty(count_cols) ? "0" :
-               join(["COALESCE(SUM(\"$c\"), 0)" for c in count_cols], " + ")
+    _contamination_stats_from_df(df, count_cols)
+end
 
-    sql = """SELECT "Contamination" AS status,
-                    COUNT(*) AS nrows,
-                    ($(sum_expr)) AS nreads
-             FROM "$(table)"
-             GROUP BY "Contamination" """
-
-    df = DataFrame(DBInterface.execute(con, sql))
+function _contamination_stats_from_df(df::DataFrame, count_cols::Vector{String})
     tally = Dict{String,NamedTuple}()
-
-    for row in eachrow(df)
-        status = string(coalesce(row.status, "unassigned"))
-        tally[status] = (; rows=Int(coalesce(row.nrows, 0)), reads=Int(coalesce(row.nreads, 0)))
-    end
-
     for status in ("yes", "no", "unassigned")
-        haskey(tally, status) || (tally[status] = (; rows=0, reads=0))
+        mask = df[!, "Contamination"] .== status
+        n_rows  = sum(mask)
+        n_reads = isempty(count_cols) ? 0 :
+                  sum(count_cols) do col
+                      sum(coalesce.(df[mask, col], 0))
+                  end
+        tally[status] = (; rows=n_rows, reads=Int(coalesce(n_reads, 0)))
     end
-
-    total_rows = sum(bucket.rows for bucket in values(tally))
-    total_reads = sum(bucket.reads for bucket in values(tally))
-
+    total_rows  = sum(v.rows  for v in values(tally))
+    total_reads = sum(v.reads for v in values(tally))
     (; yes=tally["yes"], no=tally["no"], unassigned=tally["unassigned"],
        total=(; rows=total_rows, reads=total_reads))
 end
@@ -99,18 +152,47 @@ function _annotation_catalog(study::String, run::String, source::String;
     dir = _require_duckdb(study, run; group)
     isnothing(dir) && return Any[]
 
+    result = _require_max_rank_col(study, run, source; group)
+    result isa Tuple || return result
+    (_, required_col) = result
+
     ann_dir = _annotation_dir(study, run, source; group)
     ann_db_path = _annotation_db_path(study, run, source; group)
 
     ann_table_rows = Dict{String,Int}()
     if isfile(ann_db_path)
-        _with_annotation_db(study, run, source; group) do ann_con
-            ann_tables = Set(string.(DataFrame(DBInterface.execute(ann_con, "SHOW TABLES")).name))
-            for tname in ann_tables
-                ann_table_rows[tname] = only(DataFrame(DBInterface.execute(
-                    ann_con, "SELECT COUNT(*) AS n FROM \"$tname\""))).n
+        try
+            _with_annotation_db(study, run, source; group) do ann_con
+                ann_tables = Set(string.(DataFrame(DBInterface.execute(ann_con, "SHOW TABLES")).name))
+                for tname in ann_tables
+                    ann_table_rows[tname] = only(DataFrame(DBInterface.execute(
+                        ann_con, "SELECT COUNT(*) AS n FROM \"$tname\""))).n
+                end
+            end
+        catch e
+            @warn "Failed to read annotation DB, falling back to CSV" source exception=(e, catch_backtrace())
+            for f in filter(f -> endswith(f, ".csv"), readdir(ann_dir; join=false))
+                tname = f[1:end-4]
+                try ann_table_rows[tname] = countlines(joinpath(ann_dir, f)) - 1 catch; end
             end
         end
+    end
+
+    # Collect pipeline.yml paths whose changes affect annotation output
+    # (annotation.max_rank lives in the config cascade).
+    cfg_paths = String[]
+    data_dir = ServerState.data_dir()
+    root = dirname(data_dir)
+    for p in [joinpath(root, "config", "defaults", "pipeline.yml"),
+              joinpath(root, "config", "pipeline.yml"),
+              joinpath(data_dir, study, "pipeline.yml")]
+        push!(cfg_paths, p)
+    end
+    if !isnothing(group)
+        push!(cfg_paths, joinpath(data_dir, study, group, "pipeline.yml"))
+        push!(cfg_paths, joinpath(data_dir, study, group, run, "pipeline.yml"))
+    else
+        push!(cfg_paths, joinpath(data_dir, study, run, "pipeline.yml"))
     end
 
     with_results_db(dir) do con
@@ -120,11 +202,12 @@ function _annotation_catalog(study::String, run::String, source::String;
         for tname in table_names
             cols = _duckdb_columns(con, tname)
             col_set = Set(cols)
-            all(c -> c in col_set, _ANNOTATION_REQUIRED_COLS[source]) || continue
+            required_col in col_set || continue
 
             csv_path = joinpath(ann_dir, tname * ".csv")
             merged_csv_path = joinpath(dir, tname * ".csv")
-            status = _annotation_status(csv_path, merged_csv_path, FUNCDB_PATH)
+            status = _annotation_status(csv_path, merged_csv_path, FUNCDB_PATH;
+                                        config_paths=cfg_paths)
             rows = get(ann_table_rows, tname, nothing)
             generated_at = status == "missing" ? nothing : unix2datetime(mtime(csv_path))
 
@@ -159,8 +242,10 @@ function _write_annotation_output!(study::String, run::String, source::String,
     db = DuckDB.DB(_annotation_db_path(study, run, source; group))
     con = DBInterface.connect(db)
     try
+        # Force Contamination and BLAST Assignment to VARCHAR so DuckDB doesn't
+        # misdetect them as boolean when all values happen to be "yes"/"no"/true/false.
         DBInterface.execute(con,
-            "CREATE OR REPLACE TABLE \"$(table)\" AS SELECT * FROM read_csv_auto('$(csv_path)', auto_detect=true)")
+            "CREATE OR REPLACE TABLE \"$(table)\" AS SELECT * FROM read_csv_auto('$(csv_path)', auto_detect=true, types={'Contamination': 'VARCHAR', '$(BLAST_ASSIGNMENT_COLUMN)': 'VARCHAR'})")
     finally
         DBInterface.close!(con)
         close(db)
@@ -180,102 +265,35 @@ function _annotation_response(table::String, source::String, output_path::String
     end
 end
 
-function _body_list(body_obj, field::String, base_cfg, cfg_key::String)
-    raw = get(body_obj, Symbol(field), nothing)
-    if raw isa AbstractVector
-        return String[string(v) for v in raw]
-    end
-
-    entry = get(base_cfg, cfg_key, nothing)
-    if isnothing(entry) || !(entry.value isa AbstractVector)
-        return String[]
-    end
-
-    String[string(v) for v in entry.value]
+function _annotation_select_expr(columns::Vector{String})
+    BLAST_ASSIGNMENT_COLUMN in columns && return "*"
+    "*, '' AS \"$(BLAST_ASSIGNMENT_COLUMN)\""
 end
 
-function _build_synthetic_contamination_cfg(body, base_cfg)
-    bl_fields = get(body, :blacklist, (;))
-    wl_fields = get(body, :whitelist, (;))
-
-    Dict{String,Any}(
-        "annotation.contamination.blacklist.function" =>
-            (; value=_body_list(bl_fields, "function", base_cfg,
-                                "annotation.contamination.blacklist.function"), source="run"),
-        "annotation.contamination.blacklist.detailed_function" =>
-            (; value=_body_list(bl_fields, "detailed_function", base_cfg,
-                                "annotation.contamination.blacklist.detailed_function"), source="run"),
-        "annotation.contamination.blacklist.associated_organism" =>
-            (; value=_body_list(bl_fields, "associated_organism", base_cfg,
-                                "annotation.contamination.blacklist.associated_organism"), source="run"),
-        "annotation.contamination.blacklist.associated_material" =>
-            (; value=_body_list(bl_fields, "associated_material", base_cfg,
-                                "annotation.contamination.blacklist.associated_material"), source="run"),
-        "annotation.contamination.blacklist.environment" =>
-            (; value=_body_list(bl_fields, "environment", base_cfg,
-                                "annotation.contamination.blacklist.environment"), source="run"),
-        "annotation.contamination.whitelist.function" =>
-            (; value=_body_list(wl_fields, "function", base_cfg,
-                                "annotation.contamination.whitelist.function"), source="run"),
-        "annotation.contamination.whitelist.detailed_function" =>
-            (; value=_body_list(wl_fields, "detailed_function", base_cfg,
-                                "annotation.contamination.whitelist.detailed_function"), source="run"),
-        "annotation.contamination.whitelist.associated_organism" =>
-            (; value=_body_list(wl_fields, "associated_organism", base_cfg,
-                                "annotation.contamination.whitelist.associated_organism"), source="run"),
-        "annotation.contamination.whitelist.associated_material" =>
-            (; value=_body_list(wl_fields, "associated_material", base_cfg,
-                                "annotation.contamination.whitelist.associated_material"), source="run"),
-        "annotation.contamination.whitelist.environment" =>
-            (; value=_body_list(wl_fields, "environment", base_cfg,
-                                "annotation.contamination.whitelist.environment"), source="run"),
-    )
+function _annotation_response_columns(columns::Vector{String})
+    BLAST_ASSIGNMENT_COLUMN in columns ? columns : [columns; BLAST_ASSIGNMENT_COLUMN]
 end
 
-function _persist_contamination_config!(study::String, run::String, group, synthetic_cfg)
-    run_path = isnothing(group) ? run : joinpath(group, run)
-    config_path = joinpath(ServerState.data_dir(), study, run_path, "pipeline.yml")
-
-    for (cfg_key, entry) in synthetic_cfg
-        _write_override(config_path, cfg_key, entry.value)
-    end
+function _ensure_annotation_column!(con, table::String, column::String)
+    columns = _duckdb_columns(con, table)
+    column in columns && return false
+    DBInterface.execute(con,
+        """ALTER TABLE "$(table)"
+           ADD COLUMN "$(column)" VARCHAR DEFAULT ''""")
+    true
 end
 
-function _apply_contamination_filter!(study::String, run::String, source::String, table::String,
-                                      body; group::Union{String,Nothing}=nothing)
-    base_cfg = _resolve_config(study, run, group)
-    synthetic_cfg = _build_synthetic_contamination_cfg(body, base_cfg)
-    rows = 0
-    output_path = ""
-    contam_stats = nothing
+function _sync_annotation_csv_assignment!(csv_path::String, sequence::String, assignment::String)
+    isfile(csv_path) || return
 
-    result = _with_annotation_db(study, run, source; group, readonly=false) do con
-        columns = _duckdb_columns(con, table)
-        isempty(columns) && return json_error(404, "table_not_found",
-                                              "Table '$table' not found in annotation database")
-        "Contamination" in columns || return json_error(400, "no_contamination_column",
-            "Table '$table' has no Contamination column - regenerate full annotation")
+    csv_df = CSV.read(csv_path, DataFrame; stringtype=String)
+    BLAST_ASSIGNMENT_COLUMN in names(csv_df) || (csv_df[!, BLAST_ASSIGNMENT_COLUMN] = fill("", nrow(csv_df)))
+    seq_col = Analysis.sequence_column_name(names(csv_df))
+    isnothing(seq_col) && return
 
-        df = DataFrame(DBInterface.execute(con, "SELECT * FROM \"$table\""))
-        df[!, "Contamination"] .= "unassigned"
-        FuncDBAnnotation.apply_contamination_filter!(df, synthetic_cfg)
-
-        output_path = _write_annotation_output!(study, run, source, table, df; group)
-        rows = nrow(df)
-        contam_stats = _contamination_stats(con, table)
-        nothing
-    end
-    result isa HTTP.Response && return result
-
-    try
-        _persist_contamination_config!(study, run, group, synthetic_cfg)
-    catch e
-        return json_error(500, "config_persist_failed",
-            "Contamination filter applied, but saving pipeline.yml failed: $(sprint(showerror, e))")
-    end
-
-    @info "Contamination filter applied" table source rows
-    json(_annotation_response(table, source, output_path, rows; contamination_stats=contam_stats))
+    mask = string.(coalesce.(csv_df[!, seq_col], "")) .== sequence
+    csv_df[mask, BLAST_ASSIGNMENT_COLUMN] .= assignment
+    CSV.write(csv_path, csv_df)
 end
 
 function _generate_annotation!(study::String, run::String, source::String, table::String;
@@ -284,24 +302,66 @@ function _generate_annotation!(study::String, run::String, source::String, table
     isnothing(source_df) && return json_error(404, "table_not_found",
                                               "Table '$table' not found in results database")
 
+    result = _require_max_rank_col(study, run, source; group)
+    result isa Tuple || return result
+    (max_rank, required_col) = result
+
     col_set = Set(names(source_df))
-    for col in _ANNOTATION_REQUIRED_COLS[source]
-        col in col_set || return json_error(400, "missing_taxonomy_columns",
-            "Table '$table' is missing required column '$col' for $source annotation")
-    end
+    required_col in col_set || return json_error(400, "missing_taxonomy_columns",
+        "Table '$table' is missing required column '$required_col' for $source annotation at rank '$max_rank'")
 
     annotated_df = try
-        FuncDBAnnotation.annotate_table(source_df, source, FUNCDB_PATH)
+        FuncDBAnnotation.annotate_table(source_df, source, FUNCDB_PATH; max_rank)
     catch e
         @error "Annotation failed" exception=(e, catch_backtrace())
         return json_error(500, "annotation_failed", "Annotation failed: $(sprint(showerror, e))")
     end
 
+    # Preserve user-edited Contamination and BLAST Assignment from the existing
+    # annotation by joining on the sequence column.
     try
-        cfg = _resolve_config(study, run, group)
-        FuncDBAnnotation.apply_contamination_filter!(annotated_df, cfg)
+        ann_csv = joinpath(_annotation_dir(study, run, source; group), table * ".csv")
+        if isfile(ann_csv)
+            old_df = CSV.read(ann_csv, DataFrame; stringtype=String)
+            seq_col = nothing
+            for c in names(old_df)
+                lowercase(c) == "sequence" && (seq_col = c; break)
+            end
+            if !isnothing(seq_col) && seq_col in names(annotated_df)
+                old_cols = [seq_col]
+                "Contamination" in names(old_df) && push!(old_cols, "Contamination")
+                BLAST_ASSIGNMENT_COLUMN in names(old_df) && push!(old_cols, BLAST_ASSIGNMENT_COLUMN)
+                if length(old_cols) > 1
+                    edits = select(old_df, old_cols)
+                    "Contamination" in names(edits) &&
+                        rename!(edits, "Contamination" => "_old_Contamination")
+                    BLAST_ASSIGNMENT_COLUMN in names(edits) &&
+                        rename!(edits, BLAST_ASSIGNMENT_COLUMN => "_old_BLAST")
+                    merged = leftjoin(annotated_df, edits; on=seq_col)
+                    if "_old_Contamination" in names(merged)
+                        for i in 1:nrow(merged)
+                            old_val = coalesce(merged[i, "_old_Contamination"], "")
+                            if old_val in ("yes", "no")
+                                merged[i, "Contamination"] = old_val
+                            end
+                        end
+                        select!(merged, Not("_old_Contamination"))
+                    end
+                    if "_old_BLAST" in names(merged)
+                        for i in 1:nrow(merged)
+                            old_val = coalesce(merged[i, "_old_BLAST"], "")
+                            if !isempty(old_val)
+                                merged[i, BLAST_ASSIGNMENT_COLUMN] = old_val
+                            end
+                        end
+                        select!(merged, Not("_old_BLAST"))
+                    end
+                    annotated_df = merged
+                end
+            end
+        end
     catch e
-        @warn "Contamination filter failed, skipping" exception=(e, catch_backtrace())
+        @warn "Failed to preserve user edits, starting fresh" exception=(e, catch_backtrace())
     end
 
     output_path = _write_annotation_output!(study, run, source, table, annotated_df; group)
@@ -311,71 +371,21 @@ function _generate_annotation!(study::String, run::String, source::String, table
 end
 
 function _annotation_query(con, table::String, body)
-    params = _body_filter_params(body)
-    page = max(1, Int(get(body, :page, 1)))
-    per_page = clamp(Int(get(body, :perPage, 100)), 1, 10_000)
-    sort_by = get(params, "sort", nothing)
-    sort_dir = get(params, "sort_dir", "asc")
-
     columns = _duckdb_columns(con, table)
     isempty(columns) && return json_error(404, "table_not_found",
                                           "Table '$table' not found in annotation database")
-
-    total_unfiltered = only(DataFrame(DBInterface.execute(
-        con, "SELECT COUNT(*) AS n FROM \"$table\""))).n
-
-    (where, sql_params) = _build_where(params, columns)
-    total = only(DataFrame(DBInterface.execute(
-        con, "SELECT COUNT(*) AS n FROM \"$table\" $where", sql_params))).n
-
-    count_cols = _sample_count_columns(con, table)
-    total_reads_unfiltered = _sum_reads(con, table, count_cols)
-    total_reads = _sum_reads(con, table, count_cols, where, sql_params)
-    order = _order_clause(sort_by, sort_dir, columns)
-    offset = (page - 1) * per_page
-    rows = _duckdb_rows(con,
-        "SELECT * FROM \"$table\" $where $order LIMIT $per_page OFFSET $offset",
-        sql_params)
-
-    json((; total, total_unfiltered, total_reads, total_reads_unfiltered, page,
-            per_page, columns, sample_count_columns=count_cols, rows))
+    _duckdb_paginated_query(con, table, body;
+        select_expr=_annotation_select_expr(columns),
+        response_columns=_annotation_response_columns(columns))
 end
 
 function _annotation_distinct(con, table::String, column::String, body)
-    params = _body_filter_params(body)
-    columns = _duckdb_columns(con, table)
-    column in columns || return json_error(404, "column_not_found",
-                                           "Column '$column' not found")
-
-    (where, sql_params) = _build_where(params, columns)
-    num_sql = "SELECT MIN(TRY_CAST(\"$column\" AS DOUBLE)) AS mn,
-                      MAX(TRY_CAST(\"$column\" AS DOUBLE)) AS mx,
-                      COUNT(TRY_CAST(\"$column\" AS DOUBLE)) AS cnt,
-                      SUM(TRY_CAST(\"$column\" AS DOUBLE)) AS sm,
-                      AVG(TRY_CAST(\"$column\" AS DOUBLE)) AS avg,
-                      MEDIAN(TRY_CAST(\"$column\" AS DOUBLE)) AS med,
-                      QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.25) AS q1,
-                      QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.75) AS q3
-               FROM \"$table\" $where"
-    num_row = only(DataFrame(DBInterface.execute(con, num_sql, sql_params)))
-
-    if !ismissing(num_row.mn) && num_row.cnt > 0
-        return json((; column, type="numeric", min=num_row.mn, max=num_row.mx,
-                      count=num_row.cnt, sum=num_row.sm, mean=num_row.avg,
-                      median=num_row.med, q1=num_row.q1, q3=num_row.q3))
-    end
-
-    not_null = "\"$column\" IS NOT NULL"
-    full_where = isempty(where) ? "WHERE $not_null" : "$where AND $not_null"
-    limit_n = 1000
-    vals_sql = "SELECT DISTINCT CAST(\"$column\" AS VARCHAR) AS val
-                FROM \"$table\" $full_where
-                ORDER BY val
-                LIMIT $(limit_n + 1)"
-    vals_df = DataFrame(DBInterface.execute(con, vals_sql, sql_params))
-    truncated = nrow(vals_df) > limit_n
-    vals = String[string(row.val) for row in eachrow(vals_df[1:min(nrow(vals_df), limit_n), :])]
-    json((; column, type="text", values=vals, count=length(vals), truncated))
+    _duckdb_distinct(con, table, column, body;
+        extra_guard=(col, cols) -> begin
+            col == BLAST_ASSIGNMENT_COLUMN && !(col in cols) &&
+                return json((; column=col, type="text", values=String[], count=0, truncated=false))
+            nothing
+        end)
 end
 
 function _matched_taxon_column(source::String, rank::String)
@@ -394,7 +404,7 @@ function _sync_annotation_csv!(csv_path::String, taxon_col::String, rank::String
         return
     end
 
-    mask = csv_df.funcdb_match_rank .== rank .&&
+    mask = csv_df.match_rank .== rank .&&
            lowercase.(strip.(csv_df[!, taxon_col])) .== lowercase(strip(taxon))
     csv_df.Contamination[mask] .= status
     CSV.write(csv_path, csv_df)
@@ -407,7 +417,9 @@ end
                                                                         source::String)
     err = _require_study_run_source(study, run, source)
     !isnothing(err) && return err
-    json(_annotation_catalog(study, run, source; group=_req_group(req)))
+    result = _annotation_catalog(study, run, source; group=_req_group(req))
+    result isa HTTP.Response && return result
+    json(result)
 end
 
 ## Annotation generation
@@ -429,10 +441,6 @@ end
     table = get(body, :table, nothing)
     isnothing(table) && return json_error(400, "missing_table", "Body must include 'table'")
     table = string(table)
-
-    if get(body, :contamination_only, false) === true
-        return _apply_contamination_filter!(study, run, source, table, body; group)
-    end
 
     _generate_annotation!(study, run, source, table; group)
 end
@@ -512,41 +520,107 @@ end
         return json_error(400, "invalid_status",
                           "Status must be 'unassigned', 'yes', or 'no'")
 
-    taxon_col = _matched_taxon_column(source, rank)
-    isnothing(taxon_col) && return json_error(400, "invalid_rank",
-                                              "Unknown rank '$rank'")
-
     group = _req_group(req)
+
+    taxon_col = _matched_taxon_column(source, rank)
+
     result = _with_annotation_db(study, run, source; group, readonly=false) do con
         columns = _duckdb_columns(con, table)
-        "Contamination" in columns || return json_error(400, "no_contamination_column",
+        col_set = Set(columns)
+        "Contamination" in col_set || return json_error(400, "no_contamination_column",
             "Table '$table' has no Contamination column - regenerate the annotation")
-        taxon_col in columns || return json_error(400, "missing_taxon_column",
-            "Column '$taxon_col' not found in table")
+
+        # For unmatched rows (or when the resolved column is missing), walk from
+        # the configured max_rank through coarser ranks until we find one that
+        # exists in the table. Protist tables often lack Species but have Genus.
+        if isnothing(taxon_col) || !(taxon_col in col_set)
+            max_rank = _annotation_max_rank(study, run; group)
+            start_idx = isnothing(max_rank) ? 1 :
+                get(FuncDBAnnotation._RANK_INDEX, max_rank, 1)
+            taxon_col = nothing
+            for r in FuncDBAnnotation.RANK_HIERARCHY[start_idx:end]
+                candidate = source == "VSEARCH" ? r.vsearch : r.dada2
+                if candidate in col_set
+                    taxon_col = candidate
+                    break
+                end
+            end
+        end
+
+        isnothing(taxon_col) && return json_error(400, "missing_taxon_column",
+            "No usable taxonomy column found in table '$table'")
 
         DBInterface.execute(con,
             """UPDATE "$(table)"
                SET "Contamination" = \$1
-               WHERE "funcdb_match_rank" = \$2
+               WHERE "match_rank" = \$2
                  AND LOWER(TRIM("$(taxon_col)")) = LOWER(TRIM(\$3))""",
             [status, rank, taxon])
 
         cnt = only(DataFrame(DBInterface.execute(con,
             """SELECT COUNT(*) AS n FROM "$(table)"
-               WHERE "funcdb_match_rank" = \$1
+               WHERE "match_rank" = \$1
                  AND LOWER(TRIM("$(taxon_col)")) = LOWER(TRIM(\$2))""",
             [rank, taxon]))).n
 
-        (; rows_affected=cnt)
+        (; rows_affected=cnt, resolved_taxon_col=taxon_col)
     end
     result isa HTTP.Response && return result
 
     _sync_annotation_csv!(
         joinpath(_annotation_dir(study, run, source; group), table * ".csv"),
-        taxon_col, rank, taxon, status)
+        result.resolved_taxon_col, rank, taxon, status)
 
     @info "Contamination updated" table rank taxon status rows_affected=result.rows_affected
     json((; table, rank, taxon, status, rows_affected=result.rows_affected))
+end
+
+## BLAST Assignment update
+@patch "/api/v1/studies/{study}/runs/{run}/annotations/{source}/{table}/blast-assignment" function(req,
+                                                                                                   study::String,
+                                                                                                   run::String,
+                                                                                                   source::String,
+                                                                                                   table::String)
+    err = _require_study_run_source(study, run, source)
+    !isnothing(err) && return err
+
+    body = JSON3.read(String(req.body))
+    sequence = string(get(body, :sequence, ""))
+    assignment = string(get(body, Symbol("blast_assignment"), ""))
+
+    isempty(sequence) && return json_error(400, "missing_sequence", "Body must include 'sequence'")
+
+    group = _req_group(req)
+    result = _with_annotation_db(study, run, source; group, readonly=false) do con
+        columns = _duckdb_columns(con, table)
+        isempty(columns) && return json_error(404, "table_not_found",
+                                              "Table '$table' not found")
+        seq_col = Analysis.sequence_column_name(columns)
+        isnothing(seq_col) && return json_error(400, "missing_sequence_column",
+            "Table '$table' has no sequence column")
+
+        _ensure_annotation_column!(con, table, BLAST_ASSIGNMENT_COLUMN)
+        DBInterface.execute(con,
+            """UPDATE "$(table)"
+               SET "$(BLAST_ASSIGNMENT_COLUMN)" = \$1
+               WHERE "$(seq_col)" = \$2""",
+            [assignment, sequence])
+
+        cnt = only(DataFrame(DBInterface.execute(con,
+            """SELECT COUNT(*) AS n FROM "$(table)"
+               WHERE "$(seq_col)" = \$1""",
+            [sequence]))).n
+
+        (; rows_affected=cnt)
+    end
+    result isa HTTP.Response && return result
+
+    _sync_annotation_csv_assignment!(
+        joinpath(_annotation_dir(study, run, source; group), table * ".csv"),
+        sequence, assignment)
+
+    @info "BLAST Assignment updated" table sequence rows_affected=result.rows_affected
+    json((; table, sequence, blast_assignment=assignment, rows_affected=result.rows_affected))
 end
 
 ## Contamination stats
@@ -567,3 +641,23 @@ end
         json(_contamination_stats(con, table))
     end
 end
+
+## Export annotation table as CSV
+@get "/api/v1/studies/{study}/runs/{run}/annotations/{source}/{table}/export" function(req,
+                                                                                        study::String,
+                                                                                        run::String,
+                                                                                        source::String,
+                                                                                        table::String)
+    err = _require_study_run_source(study, run, source)
+    !isnothing(err) && return err
+
+    group = _req_group(req)
+    csv_path = joinpath(_annotation_dir(study, run, source; group), table * ".csv")
+    isfile(csv_path) || return json_error(404, "not_found", "Annotation CSV not found for '$table'")
+
+    HTTP.Response(200,
+        ["Content-Type" => "text/csv",
+         "Content-Disposition" => "attachment; filename=\"$(table).csv\""],
+        body = read(csv_path))
+end
+

@@ -92,11 +92,15 @@ const STAGE_HASHES = Dict(
     ],
 )
 
-function _config_flag(run_dir::String, keys::Vector{String}, default::Bool)::Bool
+function _load_run_config(run_dir::String)::Union{Dict,Nothing}
     config_path = joinpath(run_dir, "run_config.yml")
-    isfile(config_path) || return default
+    isfile(config_path) || return nothing
     cfg = YAML.load_file(config_path)
-    cfg isa Dict || return default
+    cfg isa Dict ? cfg : nothing
+end
+
+function _config_flag(cfg::Union{Dict,Nothing}, keys::Vector{String}, default::Bool)::Bool
+    isnothing(cfg) && return default
     d = cfg
     for k in keys
         d = get(d, k, nothing)
@@ -104,11 +108,14 @@ function _config_flag(run_dir::String, keys::Vector{String}, default::Bool)::Boo
     end
     get(d, "enabled", default) == true
 end
+# Convenience overload for callers that don't pre-load config.
+_config_flag(run_dir::String, keys::Vector{String}, default::Bool) =
+    _config_flag(_load_run_config(run_dir), keys, default)
 
-_cdhit_enabled(run_dir::String)    = _config_flag(run_dir, ["cdhit"], false)
-_classify_enabled(run_dir::String) = _config_flag(run_dir, ["dada2", "taxonomy"], true)
-_vsearch_enabled(run_dir::String)  = _config_flag(run_dir, ["vsearch"], true)
-_swarm_enabled(run_dir::String)    = _config_flag(run_dir, ["swarm"], true)
+_cdhit_enabled(cfg)    = _config_flag(cfg, ["cdhit"], false)
+_classify_enabled(cfg) = _config_flag(cfg, ["dada2", "taxonomy"], true)
+_vsearch_enabled(cfg)  = _config_flag(cfg, ["vsearch"], true)
+_swarm_enabled(cfg)    = _config_flag(cfg, ["swarm"], true)
 
 # Ensure run_config.yml is up to date with the config cascade.
 # Without this, config changes made through the PATCH API are invisible to
@@ -148,7 +155,10 @@ end
 # "vsearch" is intentionally excluded: its two hash files (ASV path and OTU/SWARM
 # path) are written by concurrent Threads.@spawn tasks, so their mtime ordering
 # is non-deterministic and must not be used as a staleness signal.
-const ORDERED_HASH_STAGES = Set(["dada2_denoise", "merge_taxa"])
+# "merge_taxa" is intentionally excluded: its two hash files represent parallel
+# paths (ASV merge vs OTU merge), not sequential sub-stages. When swarm/OTU is
+# disabled only the ASV hash updates, making mtime ordering meaningless.
+const ORDERED_HASH_STAGES = Set(["dada2_denoise"])
 
 # Check whether a completed stage's config has changed since it last ran.
 # For ordered multi-hash stages (e.g. dada2_denoise), also detect when an earlier
@@ -157,7 +167,7 @@ const ORDERED_HASH_STAGES = Set(["dada2_denoise", "merge_taxa"])
 # sections haven't changed.
 function _stage_config_stale(stage::String, run_dir::String)::Bool
     config_path = joinpath(run_dir, "run_config.yml")
-    isfile(config_path) || return false  # no config yet - can't determine staleness
+    isfile(config_path) || return true  # no config - cannot verify freshness; assume stale
     hash_entries = STAGE_HASHES[stage](run_dir)
     any_found = false
     for (hash_file, sections) in hash_entries
@@ -190,7 +200,7 @@ end
 # Also flags sub-stages whose inputs are stale (upstream re-run more recently).
 function _stage_stale_keys(stage::String, run_dir::String)::Vector{String}
     config_path = joinpath(run_dir, "run_config.yml")
-    isfile(config_path) || return String[]
+    isfile(config_path) || return String["(config missing)"]
     hash_entries = STAGE_HASHES[stage](run_dir)
     keys = String[]
     for (hash_file, sections) in hash_entries
@@ -220,25 +230,20 @@ function _stage_stale_keys(stage::String, run_dir::String)::Vector{String}
     unique(sort(keys))
 end
 
-function _stage_status(stage::String, run_dir::String; study::String="")
+function _stage_status(stage::String, run_dir::String; study::String="",
+                       jobs::Vector=JobQueue.list_jobs())
     sentinel = STAGE_OUTPUTS[stage](run_dir)
     if isdir(sentinel) || isfile(sentinel)
         return "complete"
     end
-    # Check if a job is currently running this stage.
-    # Stage-specific jobs have j.stage set; pipeline jobs (j.type == "pipeline")
-    # run ALL stages so they match any stage query.
     run_name = basename(run_dir)
     substages = get(_SUBSTAGES, stage, Set{String}())
-    running_jobs = filter(JobQueue.list_jobs()) do j
+    running_jobs = filter(jobs) do j
         j.status in (JobQueue.queued, JobQueue.running) || return false
         if j.type == "pipeline"
-            # Study-level pipeline (run=nothing): matches if study matches
             isnothing(j.run) && return !isempty(study) && j.study == study
-            # Run-level pipeline: matches this specific run
             return j.run == run_name
         end
-        # Stage jobs: match exact stage name OR any sub-stage within this coarse stage
         js = something(j.stage, "")
         (js == stage || js in substages) && occursin(run_name, something(j.run, ""))
     end
@@ -252,17 +257,15 @@ function _all_stage_statuses(run_dir::String; study::String="")
     statuses   = Dict{String,String}()
     stale_keys = Dict{String,Vector{String}}()
     cascade_stale = false
+    cfg = _load_run_config(run_dir)
+    jobs = JobQueue.list_jobs()
     for stage in STAGES
-        # Optional stages: mark "disabled" and skip cascade when not enabled.
-        # These checks must precede _stage_status because a disabled stage's
-        # sentinel file may not exist, which would otherwise cascade-stale
-        # all downstream stages.
-        if stage == "cdhit"          && !_cdhit_enabled(run_dir);    statuses[stage] = "disabled"; continue; end
-        if stage == "dada2_classify" && !_classify_enabled(run_dir); statuses[stage] = "disabled"; continue; end
-        if stage == "vsearch"        && !_vsearch_enabled(run_dir);  statuses[stage] = "disabled"; continue; end
-        if stage == "swarm"          && !_swarm_enabled(run_dir);    statuses[stage] = "disabled"; continue; end
+        if stage == "cdhit"          && !_cdhit_enabled(cfg);    statuses[stage] = "disabled"; continue; end
+        if stage == "dada2_classify" && !_classify_enabled(cfg); statuses[stage] = "disabled"; continue; end
+        if stage == "vsearch"        && !_vsearch_enabled(cfg);  statuses[stage] = "disabled"; continue; end
+        if stage == "swarm"          && !_swarm_enabled(cfg);    statuses[stage] = "disabled"; continue; end
 
-        raw = _stage_status(stage, run_dir; study)
+        raw = _stage_status(stage, run_dir; study, jobs)
 
         # Independent stages (e.g. fastqc) show their own status but never
         # affect or inherit cascade_stale - they are orthogonal to the pipeline.

@@ -15,7 +15,7 @@ using CSV, DataFrames, DuckDB, DBInterface, JSON3, YAML, Logging
 
 global_logger(NullLogger())
 
-# -- Config resolution --
+# Config resolution
 let
     tmp = mktempdir()
     config_dir = joinpath(tmp, "config")
@@ -47,7 +47,7 @@ let
     rm(tmp; recursive=true, force=true)
 end
 
-# -- Project setup --
+# Project setup
 let
     tmp = mktempdir()
     mkpath(joinpath(tmp, "data", "TestStudy", "run1"))
@@ -69,7 +69,7 @@ let
     rm(tmp; recursive=true, force=true)
 end
 
-# -- DuckDB store --
+# DuckDB store
 let
     tmp = mktempdir()
     merge_dir = joinpath(tmp, "merged")
@@ -86,7 +86,7 @@ let
     rm(tmp; recursive=true, force=true)
 end
 
-# -- Diversity metrics --
+# Diversity metrics
 let
     counts = [10, 20, 30, 0, 5]
     richness(counts)
@@ -94,7 +94,7 @@ let
     simpson(counts)
 end
 
-# -- Analysis (Plotly JSON builders) --
+# Analysis (Plotly JSON builders)
 let
     try
         alpha_chart(["s1","s2"], [10,20], [1.5,2.0], [0.8,0.9])
@@ -108,7 +108,7 @@ let
     catch end
 end
 
-# -- Merge taxa (CSV/DataFrame heavy paths) --
+# Merge taxa (CSV/DataFrame heavy paths)
 let
     tmp = mktempdir()
     proj_dir = joinpath(tmp, "proj")
@@ -144,7 +144,7 @@ let
     rm(tmp; recursive=true, force=true)
 end
 
-# -- Validation --
+# Validation
 let
     tmp = mktempdir()
     try validate_environment(joinpath(tmp, "tools.yml")) catch end

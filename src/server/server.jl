@@ -79,6 +79,7 @@ module Server
 
     ## Routes
 
+    include(joinpath(@__DIR__, "routes", "duckdb_helpers.jl"))
     include(joinpath(@__DIR__, "routes", "studies.jl"))
     include(joinpath(@__DIR__, "routes", "runs.jl"))
     include(joinpath(@__DIR__, "routes", "config.jl"))
@@ -89,6 +90,7 @@ module Server
     include(joinpath(@__DIR__, "routes", "databases.jl"))
     include(joinpath(@__DIR__, "routes", "events.jl"))
     include(joinpath(@__DIR__, "routes", "analysis.jl"))
+    include(joinpath(@__DIR__, "routes", "composition.jl"))
 
     ## CORS middleware (needed when the frontend is served from a different origin)
 

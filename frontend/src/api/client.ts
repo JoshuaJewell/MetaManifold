@@ -8,6 +8,7 @@ import type {
   ApiError,
   AnnotationSource, AnnotationMeta, ContaminationStats,
   AnalysisRequest, TaxaBarRequest, ComparisonRequest, PermanovaResult,
+  CategorySet, CompositionBuildResult,
 } from './types'
 
 // Base URL for the backend API. Empty string means same-origin.
@@ -199,8 +200,14 @@ export const api = {
                      post<unknown>(`/api/v1/studies/${study}/runs/${run}/analysis/taxa-bar${gq(group)}`, body),
     pipelineStats: (study: string, run: string, group?: string | null) =>
                      get<unknown>(`/api/v1/studies/${study}/runs/${run}/analysis/pipeline-stats${gq(group)}`),
-    ranks:         (study: string, run: string, group?: string | null) =>
-                     get<string[]>(`/api/v1/studies/${study}/runs/${run}/analysis/ranks${gq(group)}`),
+    ranks:         (study: string, run: string, opts?: { table?: string; group?: string | null; source?: AnnotationSource }) => {
+                     const query = new URLSearchParams()
+                     if (opts?.group) query.set('group', opts.group)
+                     if (opts?.table) query.set('table', opts.table)
+                     if (opts?.source) query.set('source', opts.source)
+                     const qs = query.size ? `?${query.toString()}` : ''
+                     return get<string[]>(`/api/v1/studies/${study}/runs/${run}/analysis/ranks${qs}`)
+                   },
     compareAlpha:  (study: string, body: ComparisonRequest) =>
                      post<unknown>(`/api/v1/studies/${study}/analysis/alpha`, body),
     nmds:          (study: string, body: ComparisonRequest) =>
@@ -225,19 +232,48 @@ export const api = {
       patch<{ table: string; rank: string; taxon: string; status: string; rows_affected: number }>(
         `/api/v1/studies/${study}/runs/${run}/annotations/${source}/${table}/contamination${gq(group)}`,
         { rank, taxon, status }),
+    updateBlastAssignment: (
+      study: string, run: string, source: AnnotationSource, table: string,
+      sequence: string, blastAssignment: string, group?: string | null,
+    ) =>
+      patch<{ table: string; sequence: string; blast_assignment: string; rows_affected: number }>(
+        `/api/v1/studies/${study}/runs/${run}/annotations/${source}/${table}/blast-assignment${gq(group)}`,
+        { sequence, blast_assignment: blastAssignment }),
     contaminationStats: (study: string, run: string, source: AnnotationSource, table: string, group?: string | null) =>
       get<ContaminationStats>(`/api/v1/studies/${study}/runs/${run}/annotations/${source}/${table}/contamination/stats${gq(group)}`),
-    applyContaminationFilter: (
-      study: string, run: string, source: AnnotationSource, table: string,
-      filter: { blacklist: Record<string, string[]>; whitelist: Record<string, string[]> },
-      group?: string | null,
-    ) =>
-      post<AnnotationMeta & { output_path: string; contamination_stats: ContaminationStats }>(
-        `/api/v1/studies/${study}/runs/${run}/annotations/${source}/generate${gq(group)}`,
-        { table, contamination_only: true, ...filter },
-      ),
     addFuncdbEntry: (entry: Record<string, string>, modified_by?: string) =>
       post<Record<string, string>>('/api/v1/funcdb/entries', { ...entry, modified_by: modified_by ?? '' }),
+    exportCsv: (study: string, run: string, source: AnnotationSource, table: string, group?: string | null) => {
+      const url = apiUrl(`/api/v1/studies/${study}/runs/${run}/annotations/${source}/${table}/export${gq(group)}`)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${table}.csv`
+      a.click()
+    },
+  },
+
+  composition: {
+    categorySets: () => get<CategorySet[]>('/api/v1/category-sets'),
+    build: (study: string, run: string, source: AnnotationSource, table: string,
+            categorySet: string, opts?: { maxX?: number },
+            group?: string | null) =>
+      post<CompositionBuildResult>(
+        `/api/v1/studies/${study}/runs/${run}/composition/${source}/build${gq(group)}`,
+        { table, category_set: categorySet, max_x: opts?.maxX ?? -1 }),
+    query: (study: string, run: string, source: AnnotationSource, q: TableQuery,
+            group?: string | null) =>
+      post<TablePage>(
+        `/api/v1/studies/${study}/runs/${run}/composition/${source}/query${gq(group)}`, q),
+    distinct: (study: string, run: string, source: AnnotationSource, column: string,
+               activeFilters?: Record<string, ColFilter>, group?: string | null) =>
+      post<DistinctInfo>(
+        `/api/v1/studies/${study}/runs/${run}/composition/${source}/distinct/${column}${gq(group)}`,
+        activeFilters ? { colFilters: activeFilters } : {}),
+    analysis: (study: string, run: string, source: AnnotationSource,
+               categorySet?: string, prefix?: string | null, group?: string | null) =>
+      post<unknown>(
+        `/api/v1/studies/${study}/runs/${run}/composition/${source}/analysis${gq(group)}`,
+        { category_set: categorySet ?? 'default', prefix }),
   },
 
   databases: {

@@ -4,8 +4,10 @@
 import { useState, useEffect } from 'react'
 import type { RunStages, StageStatus, ConfigMap, ConfigSource } from '../api/types'
 import { api } from '../api/client'
+import { errorMessage } from '../api/errorMessage'
 import { useToast } from './Toast'
 import { timeAgo } from '../utils/timeago'
+import { SOURCE_COLORS } from './annotationShared'
 import styles from './PipelineStages.module.css'
 
 // cdhit config lives under dada2_denoise; merge_taxa is auto-chained and hidden
@@ -35,8 +37,8 @@ export const STAGE_CONFIG_PREFIXES: Record<ConfigSection, string[]> = {
   dada2_classify: ['dada2.taxonomy.', 'dada2.output.'],
   swarm:          ['swarm.'],
   vsearch:        ['vsearch.'],
-  annotation:     ['annotation.contamination.'],
-  analysis:       ['analysis.alpha.', 'analysis.nmds.', 'analysis.taxa_bar.'],
+  annotation:     ['annotation.max_rank', 'annotation.contamination.'],
+  analysis:       ['analysis.include_contamination', 'analysis.alpha.', 'analysis.nmds.', 'analysis.taxa_bar.'],
 }
 
 const STAGE_ORDER = [...VISIBLE_STAGES]
@@ -109,6 +111,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'analysis.taxa_bar.ranks':      'Rank levels to plot; null = auto (last 3 levels).',
   'analysis.taxa_bar.report_ranks':'Ranks to include in the report; null = auto (last 3 levels).',
   'analysis.alpha.metrics':       'Alpha diversity metrics to compute.',
+  'analysis.include_contamination': 'Include rows marked as contamination in analysis outputs. When false, only annotation rows tagged "no" in Contamination are used.',
   'analysis.alpha.show_points':   'Show individual samples overlaid on alpha comparison boxplots.',
   'analysis.alpha.annotate_significance': 'Annotate alpha comparison panels with Kruskal-Wallis significance.',
   'analysis.alpha.pairwise_brackets': 'Run BH-adjusted pairwise Wilcoxon rank-sum tests between every group pair and draw brackets, including n.s. results.',
@@ -116,16 +119,19 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'analysis.alpha.significance_test': 'Overall significance test used for alpha comparison annotations.',
   'analysis.nmds.distance':       'Distance metric for NMDS ordination.',
   'analysis.nmds.max_stress':     'Warn if NMDS stress exceeds this value.',
-  'annotation.contamination.blacklist.function':            'One entry per line. Rows whose funcdb_function matches an entry are marked as contamination.',
-  'annotation.contamination.blacklist.detailed_function':   'One entry per line. Rows whose funcdb_detailed_function matches an entry are marked as contamination.',
-  'annotation.contamination.blacklist.associated_organism': 'One entry per line. Rows whose funcdb_associated_organism matches are marked as contamination.',
-  'annotation.contamination.blacklist.associated_material': 'One entry per line. Rows whose funcdb_associated_material matches are marked as contamination.',
-  'annotation.contamination.blacklist.environment':         'One entry per line. Rows whose funcdb_environment matches are marked as contamination.',
-  'annotation.contamination.whitelist.function':            'One entry per line. Rows whose funcdb_function matches an entry are marked as non-contamination.',
-  'annotation.contamination.whitelist.detailed_function':   'One entry per line. Rows whose funcdb_detailed_function matches an entry are marked as non-contamination.',
-  'annotation.contamination.whitelist.associated_organism': 'One entry per line. Rows whose funcdb_associated_organism matches are marked as non-contamination.',
-  'annotation.contamination.whitelist.associated_material': 'One entry per line. Rows whose funcdb_associated_material matches are marked as non-contamination.',
-  'annotation.contamination.whitelist.environment':         'One entry per line. Rows whose funcdb_environment matches are marked as non-contamination.',
+  'annotation.max_rank':          'Finest taxonomy rank used during FuncDB annotation. Finer ranks are ignored and removed from generated annotation tables.',
+  'annotation.contamination.min_consensus_rank':  'Only apply contamination filter when VSEARCH/DADA2 consensus is at this rank or finer. Empty = no rank gate.',
+  'annotation.contamination.min_consensus_score': 'Only apply contamination filter when consensus_score is at or above this value (0-1). 0 = no score gate.',
+  'annotation.contamination.blacklist.function':            'One entry per line. Rows whose function column matches an entry are marked as contamination.',
+  'annotation.contamination.blacklist.detailed_function':   'One entry per line. Rows whose detailed_function column matches an entry are marked as contamination.',
+  'annotation.contamination.blacklist.associated_organism': 'One entry per line. Rows whose assoc_organism column matches are marked as contamination.',
+  'annotation.contamination.blacklist.associated_material': 'One entry per line. Rows whose assoc_material column matches are marked as contamination.',
+  'annotation.contamination.blacklist.environment':         'One entry per line. Rows whose environment column matches are marked as contamination.',
+  'annotation.contamination.whitelist.function':            'One entry per line. Rows whose function column matches an entry are marked as non-contamination.',
+  'annotation.contamination.whitelist.detailed_function':   'One entry per line. Rows whose detailed_function column matches an entry are marked as non-contamination.',
+  'annotation.contamination.whitelist.associated_organism': 'One entry per line. Rows whose assoc_organism column matches are marked as non-contamination.',
+  'annotation.contamination.whitelist.associated_material': 'One entry per line. Rows whose assoc_material column matches are marked as non-contamination.',
+  'annotation.contamination.whitelist.environment':         'One entry per line. Rows whose environment column matches are marked as non-contamination.',
 }
 
 export type ConfigType =
@@ -184,6 +190,9 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'swarm.fastq_minovlen':         { kind: 'int' },
   'swarm.identity':               { kind: 'float', min: 0, max: 1, step: 0.01 },
   'analysis.taxa_bar.top_n':      { kind: 'int' },
+  'annotation.max_rank':          { kind: 'enum', options: ['species', 'genus', 'family', 'order', 'class', 'division', 'supergroup'] },
+  'annotation.contamination.min_consensus_rank':  { kind: 'enum', options: ['', 'species', 'genus', 'family', 'order', 'class', 'division', 'supergroup'] },
+  'annotation.contamination.min_consensus_score': { kind: 'float', min: 0, max: 1, step: 0.01, nullable: true },
   'annotation.contamination.blacklist.function':            { kind: 'string_list' },
   'annotation.contamination.blacklist.detailed_function':   { kind: 'string_list' },
   'annotation.contamination.blacklist.associated_organism': { kind: 'string_list' },
@@ -194,6 +203,7 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'annotation.contamination.whitelist.associated_organism': { kind: 'string_list' },
   'annotation.contamination.whitelist.associated_material': { kind: 'string_list' },
   'annotation.contamination.whitelist.environment':         { kind: 'string_list' },
+  'analysis.include_contamination': { kind: 'boolean' },
   'analysis.alpha.show_points':   { kind: 'boolean' },
   'analysis.alpha.annotate_significance': { kind: 'boolean' },
   'analysis.alpha.pairwise_brackets': { kind: 'boolean' },
@@ -203,12 +213,6 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'analysis.nmds.distance':       { kind: 'enum', options: ['bray_curtis'] },
 }
 
-const SOURCE_COLORS: Record<ConfigSource, string> = {
-  default: 'var(--color-muted-fg)',
-  study:   '#e67700',
-  group:   '#5c940d',
-  run:     'var(--color-primary)',
-}
 
 interface Props {
   stages:   RunStages
@@ -417,7 +421,7 @@ function StageConfigField({ dottedKey, leafKey, value, source, study, run, group
       setEditing(false)
       onChanged()
     } catch (err) {
-      toast.error('Failed to save: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to save: ' + (errorMessage(err)))
     } finally {
       setSaving(false)
     }
@@ -441,7 +445,7 @@ function StageConfigField({ dottedKey, leafKey, value, source, study, run, group
       setEditing(false)
       onChanged()
     } catch (err) {
-      toast.error('Failed to remove: ' + (err instanceof Error ? err.message : err))
+      toast.error('Failed to remove: ' + (errorMessage(err)))
     } finally {
       setSaving(false)
     }

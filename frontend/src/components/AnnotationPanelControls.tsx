@@ -3,14 +3,10 @@
 
 import { useState } from 'react'
 import { api } from '../api/client'
+import { errorMessage } from '../api/errorMessage'
 import { useToast } from './Toast'
 import type { ContaminationStats } from '../api/types'
-import { CONTAM_FILTER_FIELDS, FUNCDB_FIELDS } from './annotationShared'
-
-interface ContamFilterState {
-  blacklist: Record<string, string>
-  whitelist: Record<string, string>
-}
+import { FUNCDB_FIELDS } from './annotationShared'
 
 export function ContamStatsBar({ stats }: { stats: ContaminationStats }) {
   const fmt = (n: number) => n.toLocaleString()
@@ -47,85 +43,15 @@ export function ContamStatsBar({ stats }: { stats: ContaminationStats }) {
   )
 }
 
-export function ContamFilterConfig({
-  config,
-  onChange,
-  onApply,
-  applying,
-  stats,
-}: {
-  config: ContamFilterState
-  onChange: (config: ContamFilterState) => void
-  onApply: () => void
-  applying: boolean
-  stats: ContaminationStats | null
-}) {
-  const setField = (side: 'blacklist' | 'whitelist', key: string, value: string) =>
-    onChange({ ...config, [side]: { ...config[side], [key]: value } })
-
-  return (
-    <div style={{
-      marginBottom: 12,
-      padding: '10px 12px',
-      background: 'var(--color-surface)',
-      borderRadius: 6,
-      border: '1px solid var(--color-border)',
-    }}>
-      <div style={{ fontWeight: 600, fontSize: '.82rem', marginBottom: 6 }}>Contamination Filter</div>
-      <div style={{ fontSize: '.76rem', color: 'var(--color-muted-fg)', marginBottom: 10 }}>
-        Apply filter recomputes contamination from the current contamination and non-contamination filters and overwrites manual row edits.
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        {(['blacklist', 'whitelist'] as const).map(side => (
-          <div key={side}>
-            <div style={{
-              fontWeight: 600,
-              fontSize: '.78rem',
-              marginBottom: 8,
-              color: side === 'blacklist' ? '#c92a2a' : '#2b8a3e',
-            }}>
-              {side === 'blacklist' ? 'Contamination filter' : 'Non-contamination filter'}
-            </div>
-            <div style={{ fontSize: '.72rem', color: 'var(--color-muted-fg)', marginBottom: 8 }}>
-              {side === 'blacklist' ? 'Matching rows are tagged as contamination.' : 'Matching rows are tagged as non-contamination.'}
-            </div>
-            {CONTAM_FILTER_FIELDS.map(({ key, label }) => (
-              <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 8, fontSize: '.78rem' }}>
-                <span>{label}</span>
-                <textarea
-                  value={config[side][key] ?? ''}
-                  onChange={event => setField(side, key, event.target.value)}
-                  rows={3}
-                  placeholder="One value per line"
-                  style={{
-                    resize: 'vertical',
-                    padding: '3px 6px',
-                    borderRadius: 4,
-                    border: '1px solid var(--color-border)',
-                    fontSize: '.78rem',
-                    background: 'var(--color-bg)',
-                    fontFamily: 'monospace',
-                  }}
-                />
-              </label>
-            ))}
-          </div>
-        ))}
-      </div>
-      <button className="btn btn-primary" onClick={onApply} disabled={applying} style={{ marginTop: 4 }}>
-        {applying ? 'Applying...' : 'Apply filter'}
-      </button>
-      {stats && <ContamStatsBar stats={stats} />}
-    </div>
-  )
-}
 
 export function AddFuncdbModal({
   onClose,
+  onSuccess,
   prefill,
   defaultModifiedBy,
 }: {
   onClose: () => void
+  onSuccess?: () => void
   prefill?: Record<string, string>
   defaultModifiedBy: string
 }) {
@@ -154,8 +80,9 @@ export function AddFuncdbModal({
       await api.annotations.addFuncdbEntry(fields, modifiedBy || undefined)
       toast.success('FuncDB entry added')
       onClose()
+      onSuccess?.()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to add entry')
+      toast.error(errorMessage(err, 'Failed to add entry'))
     } finally {
       setSaving(false)
     }

@@ -1,0 +1,10 @@
+# Archaea filter - retains all archaeal ASVs.
+databases: [pr2]
+
+filters:
+  - column: Domain
+    pattern: Archaea
+    action: keep
+
+remove_empty:
+  - Domain

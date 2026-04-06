@@ -1,0 +1,10 @@
+# Bacteria filter - retains all bacterial ASVs.
+databases: [pr2]
+
+filters:
+  - column: Domain
+    pattern: Bacteria
+    action: keep
+
+remove_empty:
+  - Domain

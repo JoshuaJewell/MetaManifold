@@ -34,4 +34,13 @@
         @test cfg["dada2"]["verbose"]       == true  # inherited
     end
 
+    @testset "default analysis contamination flag" begin
+        defaults_path = joinpath(@__DIR__, "..", "..", "config", "defaults", "pipeline.yml")
+        defaults = YAML.load_file(defaults_path)
+        @test haskey(defaults, "annotation")
+        @test defaults["annotation"]["max_rank"] == "species"
+        @test haskey(defaults, "analysis")
+        @test defaults["analysis"]["include_contamination"] == false
+    end
+
 end

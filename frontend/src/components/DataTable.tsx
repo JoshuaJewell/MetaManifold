@@ -6,6 +6,9 @@ import { useApi } from '../hooks/useApi'
 import type { TablePage, TableQuery, ColFilter, DistinctInfo } from '../api/types'
 import styles from './DataTable.module.css'
 
+const blastUrl = (seq: string) =>
+  `https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&DATABASE=nt&CMD=Put&ENTREZ_QUERY=NOT+uncultured+organism%5Borganism%5D+NOT+environmental+sample%5Borganism%5D&QUERY=${encodeURIComponent(seq)}`
+
 export interface RowPopupData {
   columns: string[]
   rows: Record<string, unknown>[]
@@ -20,6 +23,9 @@ export interface TableStats {
 
 interface Props {
   fetcher: (q: TableQuery) => Promise<TablePage>
+  refreshKey?: string | number | null
+  /** Stable key for persisting column visibility, sort, and filters to sessionStorage. */
+  storageKey?: string
   distinctFetcher?: (column: string, activeFilters?: Record<string, ColFilter>) => Promise<DistinctInfo>
   rowPopupFetcher?: (row: Record<string, unknown>) => Promise<RowPopupData | null>
   /** Extra columns available only in the popup (e.g. merged table columns not in merged_otu). */
@@ -39,20 +45,44 @@ interface Props {
   onStatsChange?: (stats: TableStats | null) => void
 }
 
+interface PersistedTableState {
+  hiddenCols?: string[]
+  stickyCols?: string[]
+  sortBy?: string | null
+  sortDir?: SortDir
+  colFilters?: Record<string, ColFilter>
+  activePreset?: 'vsearch' | 'dada2' | null
+}
+
+function loadPersistedState(key: string): PersistedTableState | null {
+  try {
+    const raw = sessionStorage.getItem(`dt:${key}`)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function savePersistedState(key: string, state: PersistedTableState) {
+  try {
+    sessionStorage.setItem(`dt:${key}`, JSON.stringify(state))
+  } catch { /* quota exceeded - ignore */ }
+}
+
 type SortDir = 'asc' | 'desc'
 
-export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColumns, cellLabels, cellRenderer, extraRowActions, showTaxonomyPresets = false, perPage = 100, initialFilters, onFiltersChange, onSortChange, onStatsChange }: Props) {
+export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, rowPopupFetcher, popupColumns, cellLabels, cellRenderer, extraRowActions, showTaxonomyPresets = false, perPage = 100, initialFilters, onFiltersChange, onSortChange, onStatsChange }: Props) {
+  const [persisted] = useState(() => storageKey ? loadPersistedState(storageKey) : null)
   const [page, setPage]             = useState(1)
   const [filter, setFilter]         = useState('')
-  const [sortBy, setSortBy]         = useState<string | null>(null)
-  const [sortDir, setSortDir]       = useState<SortDir>('asc')
-  const [colFilters, _setColFilters] = useState<Record<string, ColFilter>>(initialFilters ?? {})
+  const [sortBy, setSortBy]         = useState<string | null>(persisted?.sortBy ?? null)
+  const [sortDir, setSortDir]       = useState<SortDir>(persisted?.sortDir ?? 'asc')
+  const [colFilters, _setColFilters] = useState<Record<string, ColFilter>>(
+    persisted?.colFilters ?? initialFilters ?? {},
+  )
   const [openDropdown, setOpenDropdown] = useState<string | null>(null)
-  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set())
-  const [stickyCols, setStickyCols] = useState<Set<string>>(new Set())
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set(persisted?.hiddenCols))
+  const [stickyCols, setStickyCols] = useState<Set<string>>(new Set(persisted?.stickyCols))
   const [showColPicker, setShowColPicker] = useState(false)
-  const [countsHidden, setCountsHidden] = useState(false)
-  const [activePreset, setActivePreset] = useState<'vsearch' | 'dada2' | null>(null)
+  const [activePreset, setActivePreset] = useState<'vsearch' | 'dada2' | null>(persisted?.activePreset ?? null)
   const colPickerRef = useRef<HTMLDivElement>(null)
 
   const [popupData, setPopupData]       = useState<RowPopupData | null>(null)
@@ -102,13 +132,31 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
     onFiltersChange?.(colFilters)
   }, [colFilters]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Notify parent of restored sort state on mount.
   useEffect(() => {
-    if (initialFilters) {
+    if (persisted?.sortBy !== undefined) onSortChange?.(sortBy, sortDir)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (initialFilters && !persisted?.colFilters) {
       _setColFilters(initialFilters)
       onFiltersChange?.(initialFilters)
       setPage(1)
     }
   }, [initialFilters]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist table UI state to sessionStorage on change.
+  useEffect(() => {
+    if (!storageKey) return
+    savePersistedState(storageKey, {
+      hiddenCols: [...hiddenCols],
+      stickyCols: [...stickyCols],
+      sortBy,
+      sortDir,
+      colFilters,
+      activePreset,
+    })
+  }, [storageKey, hiddenCols, stickyCols, sortBy, sortDir, colFilters, activePreset])
 
   const bound = useCallback(() => {
     const q: TableQuery = { page, perPage }
@@ -122,7 +170,14 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
     return fetcher(q)
   }, [fetcher, page, perPage, filter, sortBy, sortDir, colFilters])
 
-  const { data, loading, error } = useApi(bound)
+  const { data, loading, error, refetch } = useApi(bound)
+
+  const prevRefreshKey = useRef(refreshKey)
+  useEffect(() => {
+    if (refreshKey == null || refreshKey === prevRefreshKey.current) return
+    prevRefreshKey.current = refreshKey
+    refetch()
+  }, [refreshKey, refetch])
 
   useEffect(() => {
     if (!data) { onStatsChange?.(null); return }
@@ -133,11 +188,8 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
   const allCols = data && Array.isArray(data.columns) ? data.columns
               : (rows.length > 0 && rows[0] ? Object.keys(rows[0]) : [])
   const sampleCountColSet = new Set(data?.sample_count_columns ?? [])
-  const effectiveHidden = new Set([
-    ...hiddenCols,
-    ...(countsHidden ? sampleCountColSet : []),
-  ])
-  const cols = allCols.filter(c => !effectiveHidden.has(c))
+  const allCountsHidden = sampleCountColSet.size > 0 && [...sampleCountColSet].every(c => hiddenCols.has(c))
+  const cols = allCols.filter(c => !hiddenCols.has(c))
   const hasSequenceCol = allCols.includes('sequence')
   const pages = data ? Math.ceil(data.total / perPage) : 0
 
@@ -265,7 +317,7 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
           <div style={{ position: 'relative' }}>
             <button className="btn" style={{ fontSize: '.78rem', padding: '3px 8px' }}
               onClick={() => setShowColPicker(v => !v)}>
-              Columns{effectiveHidden.size > 0 ? ` (${pickerCols.length - effectiveHidden.size}/${pickerCols.length})` : ''}
+              Columns{hiddenCols.size > 0 ? ` (${pickerCols.length - hiddenCols.size}/${pickerCols.length})` : ''}
             </button>
             {showColPicker && (
               <div ref={colPickerRef} className={styles.dropdown}
@@ -302,14 +354,19 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
           </>
         )}
         {sampleCountColSet.size > 0 && (
-          <button
-            className={`btn${countsHidden ? ' btn-primary' : ''}`}
-            style={{ fontSize: '.78rem', padding: '3px 8px' }}
-            onClick={() => setCountsHidden(h => !h)}
-            title={countsHidden ? 'Show sample counts' : 'Hide sample counts'}
-          >
-            {countsHidden ? 'Show counts' : 'Hide counts'}
-          </button>
+            <button
+              className={`btn${allCountsHidden ? ' btn-primary' : ''}`}
+              style={{ fontSize: '.78rem', padding: '3px 8px' }}
+              onClick={() => setHiddenCols(prev => {
+                const next = new Set(prev)
+                if (allCountsHidden) sampleCountColSet.forEach(c => next.delete(c))
+                else sampleCountColSet.forEach(c => next.add(c))
+                return next
+              })}
+              title={allCountsHidden ? 'Show sample counts' : 'Hide sample counts'}
+            >
+              {allCountsHidden ? 'Show counts' : 'Hide counts'}
+            </button>
         )}
       </div>
 
@@ -409,7 +466,7 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
                       <td className={styles.blastCell}>
                         {hasSequenceCol && (
                           <a
-                            href={`https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&DATABASE=nt&CMD=Put&ENTREZ_QUERY=NOT+uncultured+organism%5Borganism%5D+NOT+environmental+sample%5Borganism%5D&QUERY=${encodeURIComponent(String(row['sequence'] ?? ''))}`}
+                            href={blastUrl(String(row['sequence'] ?? ''))}
                             target="_blank"
                             rel="noopener noreferrer"
                             className={styles.blastLink}
@@ -472,7 +529,7 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
                               {popupHasSeq && (
                                 <td className={styles.blastCell}>
                                   <a
-                                    href={`https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&DATABASE=nt&CMD=Put&ENTREZ_QUERY=NOT+uncultured+organism%5Borganism%5D+NOT+environmental+sample%5Borganism%5D&QUERY=${encodeURIComponent(String(r['sequence'] ?? ''))}`}
+                                    href={blastUrl(String(r['sequence'] ?? ''))}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className={styles.blastLink}
@@ -492,9 +549,9 @@ export function DataTable({ fetcher, distinctFetcher, rowPopupFetcher, popupColu
           )}
           {pages > 1 && (
             <div className={styles.pager}>
-              <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>‹ Prev</button>
+              <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>{'< Prev'}</button>
               <span>Page {page} / {pages}</span>
-              <button disabled={page >= pages} onClick={() => setPage(p => p + 1)}>Next ›</button>
+              <button disabled={page >= pages} onClick={() => setPage(p => p + 1)}>{'Next >'}</button>
             </div>
           )}
         </>

@@ -5,8 +5,6 @@
 
 using JSON3, CSV, DataFrames, OrderedCollections, YAML, XLSX, DuckDB, DBInterface
 
-include(joinpath(@__DIR__, "duckdb_helpers.jl"))
-
 ## Tables
 function _merge_dir(study::String, run::String;
                     group::Union{String,Nothing}=nothing)
@@ -74,42 +72,9 @@ end
                                              "No results database for run '$run' - run the pipeline first")
 
     body = length(req.body) > 0 ? JSON3.read(String(req.body)) : (;)
-    params = _body_filter_params(body)
 
     with_results_db(dir) do con
-        columns = _duckdb_columns(con, table)
-        column in columns || return json_error(404, "column_not_found",
-                                                    "Column '$column' not found")
-        (where, sql_params) = _build_where(params, columns)
-
-        num_sql = "SELECT MIN(TRY_CAST(\"$column\" AS DOUBLE)) AS mn,
-                          MAX(TRY_CAST(\"$column\" AS DOUBLE)) AS mx,
-                          COUNT(TRY_CAST(\"$column\" AS DOUBLE)) AS cnt,
-                          SUM(TRY_CAST(\"$column\" AS DOUBLE)) AS sm,
-                          AVG(TRY_CAST(\"$column\" AS DOUBLE)) AS avg,
-                          MEDIAN(TRY_CAST(\"$column\" AS DOUBLE)) AS med,
-                          QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.25) AS q1,
-                          QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.75) AS q3
-                   FROM \"$table\" $where"
-        num_row = only(DataFrame(DBInterface.execute(con, num_sql, sql_params)))
-
-        if !ismissing(num_row.mn) && num_row.cnt > 0
-            json((; column, type="numeric", min=num_row.mn, max=num_row.mx, count=num_row.cnt,
-                    sum=num_row.sm, mean=num_row.avg, median=num_row.med,
-                    q1=num_row.q1, q3=num_row.q3))
-        else
-            not_null = "\"$column\" IS NOT NULL"
-            full_where = isempty(where) ? "WHERE $not_null" : "$where AND $not_null"
-            limit_n = 1000
-            vals_sql = "SELECT DISTINCT CAST(\"$column\" AS VARCHAR) AS val
-                        FROM \"$table\" $full_where
-                        ORDER BY val
-                        LIMIT $(limit_n + 1)"
-            vals_df = DataFrame(DBInterface.execute(con, vals_sql, sql_params))
-            truncated = nrow(vals_df) > limit_n
-            vals = String[string(row.val) for row in eachrow(vals_df[1:min(nrow(vals_df), limit_n), :])]
-            json((; column, type="text", values=vals, count=length(vals), truncated))
-        end
+        _duckdb_distinct(con, table, column, body)
     end
 end
 
@@ -128,37 +93,10 @@ end
     isnothing(dir) && return json_error(404, "no_results",
                                              "No results database for run '$run' - run the pipeline first")
 
-    body     = JSON3.read(String(req.body))
-    params   = _body_filter_params(body)
-    page     = max(1, Int(get(body, :page, 1)))
-    per_page = clamp(Int(get(body, :perPage, 100)), 1, 10_000)
-    sort_by  = get(params, "sort",     nothing)
-    sort_dir = get(params, "sort_dir", "asc")
+    body = JSON3.read(String(req.body))
 
     with_results_db(dir) do con
-        columns = _duckdb_columns(con, table)
-        isempty(columns) && return json_error(404, "table_not_found",
-                                                   "Table '$table' not found")
-
-        total_unfiltered = only(DataFrame(DBInterface.execute(con,
-            "SELECT COUNT(*) AS n FROM \"$table\""))).n
-
-        (where, sql_params) = _build_where(params, columns)
-
-        total = only(DataFrame(DBInterface.execute(con,
-            "SELECT COUNT(*) AS n FROM \"$table\" $where", sql_params))).n
-
-        count_cols              = _sample_count_columns(con, table)
-        total_reads_unfiltered  = _sum_reads(con, table, count_cols)
-        total_reads             = _sum_reads(con, table, count_cols, where, sql_params)
-
-        order = _order_clause(sort_by, sort_dir, columns)
-
-        offset = (page - 1) * per_page
-        data_sql = "SELECT * FROM \"$table\" $where $order LIMIT $per_page OFFSET $offset"
-        rows = _duckdb_rows(con, data_sql, sql_params)
-
-        json((; total, total_unfiltered, total_reads, total_reads_unfiltered, page, per_page, columns, sample_count_columns=count_cols, rows))
+        _duckdb_paginated_query(con, table, body)
     end
 end
 

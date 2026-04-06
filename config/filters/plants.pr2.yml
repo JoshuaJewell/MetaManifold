@@ -1,0 +1,11 @@
+# Plants filter - retains Streptophyta and Chlorophyta (land plants + green algae).
+databases: [pr2]
+
+filters:
+  - column: Division
+    pattern: "Streptophyta|Chlorophyta"
+    regex: true
+    action: keep
+
+remove_empty:
+  - Division

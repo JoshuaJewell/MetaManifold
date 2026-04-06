@@ -1,63 +1,72 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api } from '../api/client'
+import { errorMessage } from '../api/errorMessage'
+import { useAnalysis } from '../hooks/useAnalysis'
 import { DataTable } from './DataTable'
+import { AnalysisControls } from './AnalysisControls'
 import { useToast } from './Toast'
-import { AddFuncdbModal, ContamFilterConfig } from './AnnotationPanelControls'
-import { CONTAM_STYLE, prefillFromRow, RANK_COL, SOURCES, type ContamStatus } from './annotationShared'
+import { AddFuncdbModal, ContamStatsBar } from './AnnotationPanelControls'
+import { BLAST_ASSIGNMENT_COLUMN, CONTAM_STYLE, findFinestRank, prefillFromRow, RANK_COL, SOURCES, type ContamStatus } from './annotationShared'
 import type { AnnotationMeta, AnnotationSource, ColFilter, ContaminationStats, TableQuery } from '../api/types'
 
 type UIStatus = AnnotationMeta['status'] | 'generating' | 'error'
 
-interface ContamFilterState {
-  blacklist: Record<string, string>
-  whitelist: Record<string, string>
-}
+function BlastAssignmentCell({
+  value,
+  onSave,
+}: {
+  value: string
+  onSave: (nextValue: string) => Promise<void>
+}) {
+  const [draft, setDraft] = useState(value)
+  const [saving, setSaving] = useState(false)
 
-function emptyContamConfig(): ContamFilterState {
-  return { blacklist: {}, whitelist: {} }
-}
+  useEffect(() => {
+    setDraft(value)
+  }, [value])
 
-function parseConfigList(cfg: Record<string, { value: unknown }>, key: string): string {
-  const value = cfg[key]?.value
-  return Array.isArray(value) ? value.map(String).join('\n') : ''
-}
+  const commit = useCallback(async () => {
+    if (saving || draft === value) return
+    setSaving(true)
+    try {
+      await onSave(draft)
+    } finally {
+      setSaving(false)
+    }
+  }, [draft, onSave, saving, value])
 
-function buildContamConfig(cfg: Record<string, { value: unknown }>): ContamFilterState {
-  return {
-    blacklist: {
-      function: parseConfigList(cfg, 'annotation.contamination.blacklist.function'),
-      detailed_function: parseConfigList(cfg, 'annotation.contamination.blacklist.detailed_function'),
-      associated_organism: parseConfigList(cfg, 'annotation.contamination.blacklist.associated_organism'),
-      associated_material: parseConfigList(cfg, 'annotation.contamination.blacklist.associated_material'),
-      environment: parseConfigList(cfg, 'annotation.contamination.blacklist.environment'),
-    },
-    whitelist: {
-      function: parseConfigList(cfg, 'annotation.contamination.whitelist.function'),
-      detailed_function: parseConfigList(cfg, 'annotation.contamination.whitelist.detailed_function'),
-      associated_organism: parseConfigList(cfg, 'annotation.contamination.whitelist.associated_organism'),
-      associated_material: parseConfigList(cfg, 'annotation.contamination.whitelist.associated_material'),
-      environment: parseConfigList(cfg, 'annotation.contamination.whitelist.environment'),
-    },
-  }
-}
-
-function parseFilterLines(value: string): string[] {
-  return value.split('\n').map(line => line.trim()).filter(Boolean)
-}
-
-function buildFilterPayload(config: ContamFilterState) {
-  return {
-    blacklist: Object.fromEntries(
-      Object.entries(config.blacklist).map(([key, value]) => [key, parseFilterLines(value)]),
-    ),
-    whitelist: Object.fromEntries(
-      Object.entries(config.whitelist).map(([key, value]) => [key, parseFilterLines(value)]),
-    ),
-  }
+  return (
+    <input
+      value={draft}
+      placeholder="Edit assignment"
+      title="BLAST Assignment"
+      onChange={event => setDraft(event.target.value)}
+      onBlur={() => { void commit() }}
+      onClick={event => event.stopPropagation()}
+      onKeyDown={event => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          void commit()
+        } else if (event.key === 'Escape') {
+          setDraft(value)
+        }
+      }}
+      style={{
+        width: '100%',
+        minWidth: 160,
+        padding: '2px 6px',
+        borderRadius: 4,
+        border: '1px solid var(--color-border)',
+        fontSize: '.75rem',
+        background: 'var(--color-bg)',
+        opacity: saving ? 0.7 : 1,
+      }}
+    />
+  )
 }
 
 function AnnotationStatusBadge({ status }: { status: UIStatus }) {
@@ -81,7 +90,7 @@ function AnnotationStatusBadge({ status }: { status: UIStatus }) {
   )
 }
 
-export function AnnotationPanel({ study, run, group }: { study: string; run: string; group?: string }) {
+export function AnnotationPanel({ study, run, group, subgroups }: { study: string; run: string; group?: string; subgroups?: string[] }) {
   const toast = useToast()
   const [source, setSource] = useState<AnnotationSource>('VSEARCH')
   const [listing, setListing] = useState<AnnotationMeta[]>([])
@@ -92,10 +101,13 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
   const [contamOverrides, setContamOverrides] = useState<Record<string, ContamStatus>>({})
   const [addFuncdbPrefill, setAddFuncdbPrefill] = useState<Record<string, string> | null>(null)
   const [defaultModifiedBy, setDefaultModifiedBy] = useState('')
-  const [contamConfig, setContamConfig] = useState<ContamFilterState>(emptyContamConfig)
+  const [configMaxRank, setConfigMaxRank] = useState<string>('species')
   const [contamStats, setContamStats] = useState<ContaminationStats | null>(null)
-  const [applying, setApplying] = useState(false)
-  const [tableKey, setTableKey] = useState(0)
+  const [blastAssignmentRefreshKey, setBlastAssignmentRefreshKey] = useState(0)
+  const [filters, setFilters] = useState<Record<string, ColFilter>>({})
+  const [selectedSubgroup, setSelectedSubgroup] = useState<string | null>(null)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
 
   const selectedMeta = useMemo(
     () => listing.find(item => item.table === selected) ?? null,
@@ -112,7 +124,9 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
   useEffect(() => {
     if (!study || !run) return
     api.config.getRun(study, run, group ?? null).then(cfg => {
-      setContamConfig(buildContamConfig(cfg as Record<string, { value: unknown }>))
+      const entry = cfg['annotation.max_rank'] as { value?: unknown } | undefined
+      const v = typeof entry?.value === 'string' ? entry.value : 'species'
+      setConfigMaxRank(v)
     }).catch(() => {})
   }, [study, run, group])
 
@@ -121,7 +135,8 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
       setLoading(true)
       const items = await api.annotations.list(study, run, source, group)
       setListing(items)
-      const preferred = (selected ? items.find(item => item.table === selected) : null)
+      const cur = selectedRef.current
+      const preferred = (cur ? items.find(item => item.table === cur) : null)
         ?? items.find(item => item.status === 'fresh' || item.status === 'stale')
         ?? items[0]
 
@@ -130,12 +145,12 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
       setErrorMsg(null)
     } catch (err) {
       toast.error('Failed to load annotation listing')
-      setErrorMsg(err instanceof Error ? err.message : String(err))
+      setErrorMsg(errorMessage(err))
       setUiStatus('error')
     } finally {
       setLoading(false)
     }
-  }, [study, run, source, group, selected, toast])
+  }, [study, run, source, group, toast])
 
   useEffect(() => { void fetchListing() }, [fetchListing])
 
@@ -153,10 +168,20 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
 
   useEffect(() => { void fetchStats() }, [fetchStats])
 
+  const analysisEnabled = uiStatus === 'fresh' || uiStatus === 'stale'
+  const analysis = useAnalysis({
+    study, run, group, source,
+    table: selected,
+    colFilters: filters,
+    prefix: selectedSubgroup || undefined,
+    enabled: analysisEnabled,
+  })
+
   useEffect(() => {
     setContamOverrides({})
     setContamStats(null)
-  }, [source, selected])
+    analysis.resetFigures()
+  }, [source, selected, analysis.resetFigures])
 
   const handleSelect = useCallback((table: string) => {
     setSelected(table)
@@ -176,20 +201,28 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
       await fetchListing()
     } catch (err) {
       setUiStatus('error')
-      setErrorMsg(err instanceof Error ? err.message : String(err))
+      setErrorMsg(errorMessage(err))
       toast.error('Annotation generation failed')
     }
   }, [fetchListing, group, run, selected, source, study, toast])
+
+  const maxRank = configMaxRank in RANK_COL ? configMaxRank : 'species'
 
   const handleContaminationChange = useCallback(async (
     row: Record<string, unknown>,
     newStatus: ContamStatus,
   ) => {
     if (!selected) return
-    const rank = String(row.funcdb_match_rank ?? '')
-    if (!rank || rank === 'unmatched') return
+    const rank = String(row.match_rank ?? '')
+    if (!rank) return
 
-    const taxonCol = RANK_COL[rank]?.[source]
+    // For unmatched rows, find the finest rank with a non-empty value in the row,
+    // starting from the configured max_rank. This handles tables that don't have
+    // a Species column (e.g. protist tables whose finest rank is Genus).
+    const effectiveRank = rank === 'unmatched'
+      ? findFinestRank(row, source, maxRank) ?? maxRank
+      : rank
+    const taxonCol = RANK_COL[effectiveRank]?.[source]
     const taxon = taxonCol ? String(row[taxonCol] ?? '') : ''
     if (!taxon) return
 
@@ -201,53 +234,17 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
         study, run, source, selected, rank, taxon, newStatus, group,
       )
       if (response.rows_affected > 1) toast.success(`${response.rows_affected} rows updated`)
+      void fetchStats()
     } catch (err) {
       setContamOverrides(current => {
         const next = { ...current }
         delete next[overrideKey]
         return next
       })
-      toast.error(err instanceof Error ? err.message : 'Update failed')
+      toast.error(errorMessage(err, 'Update failed'))
     }
-  }, [group, run, selected, source, study, toast])
+  }, [fetchStats, group, maxRank, run, selected, source, study, toast])
 
-  const handleApplyFilter = useCallback(async () => {
-    if (!selected) return
-    setApplying(true)
-    try {
-      const response = await api.annotations.applyContaminationFilter(
-        study, run, source, selected, buildFilterPayload(contamConfig), group,
-      )
-      setContamOverrides({})
-      setContamStats(response.contamination_stats)
-      setUiStatus(response.status)
-      setErrorMsg(null)
-      setListing(current => current.map(item =>
-        item.table === selected
-          ? { ...item, status: response.status, rows: response.rows, generated_at: response.generated_at }
-          : item,
-      ))
-      setTableKey(current => current + 1)
-      await fetchListing()
-      toast.success('Contamination filter applied')
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Apply failed')
-      toast.error(err instanceof Error ? err.message : 'Apply failed')
-    } finally {
-      setApplying(false)
-    }
-  }, [contamConfig, fetchListing, group, run, selected, source, study, toast])
-
-  const fetcher = useCallback(
-    (query: TableQuery) => api.annotations.query(study, run, source, selected!, query, group),
-    [group, run, selected, source, study],
-  )
-
-  const distinctFetcher = useCallback(
-    (column: string, activeFilters?: Record<string, ColFilter>) =>
-      api.annotations.distinct(study, run, source, selected!, column, activeFilters, group),
-    [group, run, selected, source, study],
-  )
 
   const cellRenderer = useCallback((
     column: string,
@@ -256,8 +253,11 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
   ): ReactNode | null => {
     if (column !== 'Contamination') return null
 
-    const rank = String(row.funcdb_match_rank ?? '')
-    const taxonCol = RANK_COL[rank]?.[source]
+    const rank = String(row.match_rank ?? '')
+    const effectiveRank = rank === 'unmatched'
+      ? findFinestRank(row, source, maxRank) ?? maxRank
+      : rank
+    const taxonCol = RANK_COL[effectiveRank]?.[source]
     const taxon = taxonCol ? String(row[taxonCol] ?? '').toLowerCase().trim() : ''
     const overrideKey = `${rank}:${taxon}`
     const resolved = (contamOverrides[overrideKey] ?? (value || 'unassigned')) as ContamStatus
@@ -284,7 +284,7 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
         <option value="no">no</option>
       </select>
     )
-  }, [contamOverrides, handleContaminationChange, source])
+  }, [contamOverrides, handleContaminationChange, maxRank, source])
 
   const extraRowActions = useCallback((row: Record<string, unknown>) => (
     <button
@@ -299,6 +299,56 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
       +
     </button>
   ), [source])
+
+  const fetcher = useCallback(
+    (query: TableQuery) => api.annotations.query(study, run, source, selected!, query, group),
+    [group, run, selected, source, study],
+  )
+
+  const distinctFetcher = useCallback(
+    (column: string, activeFilters?: Record<string, ColFilter>) =>
+      api.annotations.distinct(study, run, source, selected!, column, activeFilters, group),
+    [group, run, selected, source, study],
+  )
+
+
+  const handleBlastAssignmentSave = useCallback(async (
+    row: Record<string, unknown>,
+    nextValue: string,
+  ) => {
+    if (!selected) return
+    const sequence = String(row.sequence ?? '').trim()
+    if (!sequence) {
+      toast.error('This row has no sequence value to identify it')
+      return
+    }
+
+    try {
+      await api.annotations.updateBlastAssignment(
+        study, run, source, selected, sequence, nextValue, group,
+      )
+      setBlastAssignmentRefreshKey(current => current + 1)
+    } catch (err) {
+      toast.error(errorMessage(err, 'Failed to update BLAST Assignment'))
+      throw err
+    }
+  }, [group, run, selected, source, study, toast])
+
+  const mergedCellRenderer = useCallback((
+    column: string,
+    value: string,
+    row: Record<string, unknown>,
+  ): ReactNode | null => {
+    if (column === BLAST_ASSIGNMENT_COLUMN) {
+      return (
+        <BlastAssignmentCell
+          value={value}
+          onSave={nextValue => handleBlastAssignmentSave(row, nextValue)}
+        />
+      )
+    }
+    return cellRenderer(column, value, row)
+  }, [cellRenderer, handleBlastAssignmentSave])
 
   const showTable = uiStatus === 'fresh' || uiStatus === 'stale'
     || (uiStatus === 'generating' && selectedMeta?.status !== 'missing')
@@ -343,12 +393,22 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
             {selected && <AnnotationStatusBadge status={uiStatus} />}
 
             {selected && uiStatus !== 'generating' && (
-              <button
-                className={`btn ${uiStatus === 'stale' || uiStatus === 'missing' || uiStatus === 'error' ? 'btn-primary' : ''}`}
-                onClick={handleGenerate}
-              >
-                {uiStatus === 'missing' ? 'Generate' : uiStatus === 'error' ? 'Retry' : 'Regenerate'}
-              </button>
+              <>
+                <button
+                  className={`btn ${uiStatus === 'stale' || uiStatus === 'missing' || uiStatus === 'error' ? 'btn-primary' : ''}`}
+                  onClick={handleGenerate}
+                >
+                  {uiStatus === 'missing' ? 'Generate' : uiStatus === 'error' ? 'Retry' : 'Regenerate'}
+                </button>
+                {showTable && (
+                  <>
+                    <button className="btn" onClick={() => api.annotations.exportCsv(study, run, source, selected, group)}
+                      title="Download annotation table as CSV">
+                      Export CSV
+                    </button>
+                  </>
+                )}
+              </>
             )}
 
             {uiStatus === 'generating' && (
@@ -386,33 +446,50 @@ export function AnnotationPanel({ study, run, group }: { study: string; run: str
             </div>
           )}
 
-          {selected && showTable && (
-            <ContamFilterConfig
-              config={contamConfig}
-              onChange={setContamConfig}
-              onApply={handleApplyFilter}
-              applying={applying}
-              stats={contamStats}
-            />
+          {selected && showTable && contamStats && (
+            <ContamStatsBar stats={contamStats} />
           )}
 
           {selected && showTable && (
-            <DataTable
-              key={`${source}-${selected}-${tableKey}`}
-              fetcher={fetcher}
-              distinctFetcher={distinctFetcher}
-              cellRenderer={cellRenderer}
-              extraRowActions={extraRowActions}
-            />
+            <>
+              <DataTable
+                key={`${source}-${selected}`}
+                storageKey={`ann:${study}/${run}/${group ?? ''}/${source}/${selected}`}
+                refreshKey={blastAssignmentRefreshKey}
+                fetcher={fetcher}
+                distinctFetcher={distinctFetcher}
+                cellRenderer={mergedCellRenderer}
+                extraRowActions={extraRowActions}
+                onFiltersChange={setFilters}
+              />
+
+              {analysis.ranks.length > 0 && (
+                <AnalysisControls {...analysis} body={selected}>
+                  {subgroups && subgroups.length >= 2 && (
+                    <select
+                      value={selectedSubgroup ?? ''}
+                      onChange={e => setSelectedSubgroup(e.target.value || null)}
+                      style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--color-border)',
+                               fontSize: '.82rem', background: 'var(--color-bg)' }}
+                    >
+                      <option value="">All sub-groups</option>
+                      {subgroups.map(sg => <option key={sg} value={sg}>{sg}</option>)}
+                    </select>
+                  )}
+                </AnalysisControls>
+              )}
+            </>
           )}
         </>
       )}
+
 
       {addFuncdbPrefill !== null && (
         <AddFuncdbModal
           prefill={addFuncdbPrefill}
           defaultModifiedBy={defaultModifiedBy}
           onClose={() => setAddFuncdbPrefill(null)}
+          onSuccess={handleGenerate}
         />
       )}
     </div>

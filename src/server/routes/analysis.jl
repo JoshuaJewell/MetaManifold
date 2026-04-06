@@ -6,9 +6,10 @@
 using CSV, DataFrames
 
 using MetaManifold.Analysis: alpha_chart, taxa_bar_chart, pipeline_stats_chart,
-                             sample_columns, taxonomy_levels, filtered_counts,
+                             sample_columns, taxonomy_levels, taxon_column, filtered_counts,
                              aggregate_by_taxon, combined_counts_across_runs,
-                             alpha_boxplot, nmds_chart, run_nmds, run_permanova, r_available
+                             alpha_boxplot, nmds_chart, run_nmds, run_permanova, r_available,
+                             sequence_column_name
 
 function _validate_run_request(study::String, run::String)
     study in _study_names() || return json_error(404, "study_not_found",
@@ -38,14 +39,16 @@ end
 
     body = JSON3.read(String(req.body))
     table = get(body, :table, "merged")
+    source = haskey(body, :source) ? string(get(body, :source)) : nothing
     params = _body_filter_params(body)
+    include_contamination = _analysis_include_contamination(study; run, group)
 
-    with_results_db(dir) do con
-        scols = sample_columns(con, table)
+    prefix = let p = get(body, :prefix, nothing); isnothing(p) ? nothing : string(p) end
+
+    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, columns
+        scols = _filter_by_prefix(sample_columns(con, table), prefix)
         isempty(scols) && return json_error(400, "no_samples", "No sample columns found in table '$table'")
-
-        columns = _duckdb_columns(con, table)
-        where_clause, where_params = _build_where(params, columns)
+        where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
         mat = filtered_counts(con, table, scols, where_clause, where_params)
 
         r = Int[]; sh = Float64[]; si = Float64[]
@@ -72,17 +75,18 @@ end
 
     body = JSON3.read(String(req.body))
     table = get(body, :table, "merged")
+    source = haskey(body, :source) ? string(get(body, :source)) : nothing
     rank = get(body, :rank, nothing)
     top_n = get(body, :top_n, 15)
     relative = get(body, :relative, true)
+    prefix = let p = get(body, :prefix, nothing); isnothing(p) ? nothing : string(p) end
     params = _body_filter_params(body)
+    include_contamination = _analysis_include_contamination(study; run, group)
 
-    with_results_db(dir) do con
-        scols = sample_columns(con, table)
+    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, columns
+        scols = _filter_by_prefix(sample_columns(con, table), prefix)
         isempty(scols) && return json_error(400, "no_samples", "No sample columns found")
-
-        columns = _duckdb_columns(con, table)
-        where_clause, where_params = _build_where(params, columns)
+        where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
 
         if isnothing(rank)
             levels = taxonomy_levels(con, table)
@@ -90,7 +94,8 @@ end
             rank = last(levels)
         end
 
-        agg = aggregate_by_taxon(con, table, scols, string(rank), where_clause, where_params)
+        rank_col = taxon_column(columns, string(rank))
+        agg = aggregate_by_taxon(con, table, scols, rank_col, where_clause, where_params)
         nrow(agg) == 0 && return json_error(400, "no_data", "No data after filtering")
 
         taxon_labels = String.(agg.taxon)
@@ -134,16 +139,10 @@ end
     dir = _require_duckdb(study, run; group)
     isnothing(dir) && return json([])
 
-    table = try
-        b = JSON3.read(String(req.body))
-        get(b, :table, "merged")
-    catch
-        "merged"
-    end
-
-    with_results_db(dir) do con
-        levels = taxonomy_levels(con, table)
-        json(levels)
+    table = get(HTTP.queryparams(req), "table", "merged")
+    source = get(HTTP.queryparams(req), "source", nothing)
+    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, _
+        json(taxonomy_levels(con, table))
     end
 end
 
@@ -156,6 +155,7 @@ function _resolve_run_duckdb(study::String, run_spec)
     run_name = string(get(run_spec, :run, ""))
     group  = _opt_string(run_spec, :group)
     prefix = _opt_string(run_spec, :prefix)
+    source = _opt_string(run_spec, :source)
     dir = _require_duckdb(study, run_name; group)
     isnothing(dir) && return nothing
     label = if !isnothing(prefix)
@@ -165,7 +165,7 @@ function _resolve_run_duckdb(study::String, run_spec)
     else
         run_name
     end
-    (; run=run_name, group, dir, label, prefix)
+    (; run=run_name, group, dir, label, prefix, source)
 end
 
 """Filter sample columns to those matching a prefix (e.g. "SubgroupName_")."""
@@ -196,6 +196,96 @@ end
 function _study_seed(study::String)
     resolved = _resolve_config(study)
     Int(get(get(resolved, "seed", (; value=DEFAULT_SEED, source="default")), :value, DEFAULT_SEED))
+end
+
+function _analysis_include_contamination(study::String;
+                                         run::Union{String,Nothing}=nothing,
+                                         group::Union{String,Nothing}=nothing,
+                                         config_cache::Union{Dict,Nothing}=nothing)
+    key = (study, something(run, ""), something(group, ""))
+    resolved = if !isnothing(config_cache) && haskey(config_cache, key)
+        config_cache[key]
+    else
+        cfg = _resolve_config(study, run, group)
+        !isnothing(config_cache) && (config_cache[key] = cfg)
+        cfg
+    end
+    entry = get(resolved, "analysis.include_contamination", (; value=false, source="default"))
+    Bool(get(entry, :value, false))
+end
+
+function _resolve_analysis_source(study::String, run::String, table::String;
+                                  group::Union{String,Nothing}=nothing,
+                                  requested_source::Union{String,Nothing}=nothing)
+    sources = isnothing(requested_source) ? ("DADA2", "VSEARCH") : (requested_source,)
+    for source in sources
+        ann_db = _annotation_db_path(study, run, source; group)
+        isfile(ann_db) || continue
+        found = _with_annotation_db(study, run, source; group) do con
+            table in String.(DataFrame(DBInterface.execute(con, "SHOW TABLES")).name)
+        end
+        found === true && return source
+    end
+    nothing
+end
+
+function _resolve_analysis_source_with_sequence(study::String, run::String, table::String;
+                                                group::Union{String,Nothing}=nothing,
+                                                requested_source::Union{String,Nothing}=nothing)
+    sources = if isnothing(requested_source)
+        ("DADA2", "VSEARCH")
+    else
+        requested_source == "DADA2" ? ("DADA2", "VSEARCH") : (requested_source, "DADA2")
+    end
+    table_found_without_sequence = false
+
+    for source in sources
+        ann_db = _annotation_db_path(study, run, source; group)
+        isfile(ann_db) || continue
+        result = _with_annotation_db(study, run, source; group) do con
+            columns = _duckdb_columns(con, table)
+            isempty(columns) && return (:missing, nothing)
+            seq_col = sequence_column_name(columns)
+            isnothing(seq_col) && return (:present_without_sequence, nothing)
+            (:ok, source)
+        end
+        result == (:ok, source) && return source, false, false
+        result == (:present_without_sequence, nothing) && (table_found_without_sequence = true)
+    end
+
+    if table_found_without_sequence
+        return nothing, true, false
+    end
+    nothing, false, true
+end
+
+function _analysis_where_clause(params, columns::Vector{String};
+                                include_contamination::Bool=false)
+    where_clause, where_params = _build_where(params, columns)
+    if !include_contamination && "Contamination" in columns
+        contam_clause = "COALESCE(LOWER(TRIM(\"Contamination\")), '') != 'yes'"
+        where_clause = isempty(where_clause) ? "WHERE $contam_clause" : "$where_clause AND $contam_clause"
+    end
+    where_clause, where_params
+end
+
+function _with_analysis_annotation_table(f::Function, study::String, run::String, table::String;
+                                         group::Union{String,Nothing}=nothing,
+                                         requested_source::Union{String,Nothing}=nothing)
+    source = _resolve_analysis_source(study, run, table; group, requested_source)
+    isnothing(source) && return json_error(
+        404, "no_annotation_table",
+        isnothing(requested_source) ?
+            "Analysis requires an annotated '$table' table. Generate annotations first." :
+            "Analysis requires annotated '$table' data for source '$requested_source'."
+    )
+
+    _with_annotation_db(study, run, source; group) do con
+        columns = _duckdb_columns(con, table)
+        isempty(columns) && return json_error(404, "table_not_found",
+                                              "Annotated table '$table' not found")
+        f(con, source, columns)
+    end
 end
 
 function _study_alpha_plot_config(study::String)
@@ -242,9 +332,10 @@ function _expand_comparison_run_specs(study::String, runs_spec)
         isempty(run_name) && continue
         group  = _opt_string(spec, :group)
         prefix = _opt_string(spec, :prefix)
+        source = _opt_string(spec, :source)
 
         if !isnothing(prefix)
-            push!(expanded, (; run=run_name, group, prefix))
+            push!(expanded, (; run=run_name, group, prefix, source))
             continue
         end
 
@@ -252,10 +343,10 @@ function _expand_comparison_run_specs(study::String, runs_spec)
         data_dir = joinpath(ServerState.data_dir(), study, data_rel)
         if _is_pooled(data_dir)
             for subgroup in _subgroup_names(data_dir)
-                push!(expanded, (; run=run_name, group, prefix=subgroup))
+                push!(expanded, (; run=run_name, group, prefix=subgroup, source))
             end
         else
-            push!(expanded, (; run=run_name, group, prefix=nothing))
+            push!(expanded, (; run=run_name, group, prefix=nothing, source))
         end
     end
     expanded
@@ -266,30 +357,41 @@ function _collect_cross_run_asvs(study::String, runs_spec, table, params)
     group_labels = String[]
     run_labels = String[]
     missing_seq = false
+    missing_annotation = false
+    cfg_cache = Dict{Tuple{String,String,String}, Any}()
 
     for spec in _expand_comparison_run_specs(study, runs_spec)
         resolved = _resolve_run_duckdb(study, spec)
         isnothing(resolved) && continue
-        with_results_db(resolved.dir) do con
+        source, source_missing_seq, source_missing_annotation = _resolve_analysis_source_with_sequence(
+            study, resolved.run, table; group=resolved.group, requested_source=resolved.source)
+        if isnothing(source)
+            missing_seq |= source_missing_seq
+            missing_annotation |= source_missing_annotation
+            continue
+        end
+        include_contamination = _analysis_include_contamination(study; run=resolved.run, group=resolved.group, config_cache=cfg_cache)
+        _with_annotation_db(study, resolved.run, source; group=resolved.group) do con
             scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
             isempty(scols) && return
 
             columns = _duckdb_columns(con, table)
-            if !("sequence" in columns)
+            seq_col = sequence_column_name(columns)
+            if isnothing(seq_col)
                 missing_seq = true
                 return
             end
 
-            where_clause, where_params = _build_where(params, columns)
+            where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
             seq_filter = isempty(where_clause) ?
-                "WHERE \"sequence\" IS NOT NULL AND TRIM(\"sequence\") != ''" :
-                "$where_clause AND \"sequence\" IS NOT NULL AND TRIM(\"sequence\") != ''"
+                "WHERE \"$seq_col\" IS NOT NULL AND TRIM(\"$seq_col\") != ''" :
+                "$where_clause AND \"$seq_col\" IS NOT NULL AND TRIM(\"$seq_col\") != ''"
 
             sum_exprs = join(["SUM(COALESCE(\"$c\", 0)) AS \"$c\"" for c in scols], ", ")
             sql = """
-                SELECT "sequence", $sum_exprs
+                SELECT "$seq_col" AS "sequence", $sum_exprs
                 FROM "$table" $seq_filter
-                GROUP BY "sequence"
+                GROUP BY "$seq_col"
             """
             df = DataFrame(DBInterface.execute(con, sql, where_params))
             nrow(df) == 0 && return
@@ -302,7 +404,7 @@ function _collect_cross_run_asvs(study::String, runs_spec, table, params)
         end
     end
 
-    run_data, group_labels, run_labels, missing_seq
+    run_data, group_labels, run_labels, missing_seq, missing_annotation
 end
 
 function _drop_empty_samples(mat::Matrix{Float64}, aligned::AbstractVector...)
@@ -330,13 +432,18 @@ end
 
     compare_mode = length(unique(_resolved_run_label(r) for r in resolved_specs)) > 1 ? :run : :subgroup
     groups = Dict{String, NamedTuple{(:sample_ids, :richness, :shannon, :simpson), Tuple{Vector{String}, Vector{Int}, Vector{Float64}, Vector{Float64}}}}()
+    cfg_cache = Dict{Tuple{String,String,String}, Any}()
 
     for resolved in resolved_specs
-        with_results_db(resolved.dir) do con
+        source = _resolve_analysis_source(study, resolved.run, table; group=resolved.group,
+                                          requested_source=resolved.source)
+        isnothing(source) && continue
+        include_contamination = _analysis_include_contamination(study; run=resolved.run, group=resolved.group, config_cache=cfg_cache)
+        _with_annotation_db(study, resolved.run, source; group=resolved.group) do con
             scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
             isempty(scols) && return
             columns = _duckdb_columns(con, table)
-            where_clause, where_params = _build_where(params, columns)
+            where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
             mat = filtered_counts(con, table, scols, where_clause, where_params)
             r = Int[]; sh = Float64[]; si = Float64[]
             for i in eachindex(scols)
@@ -387,10 +494,12 @@ end
     table = get(body, :table, "merged")
     params = _body_filter_params(body)
 
-    run_data, group_labels, run_name_labels, missing_seq = _collect_cross_run_asvs(study, runs_spec, table, params)
+    run_data, group_labels, run_name_labels, missing_seq, missing_annotation = _collect_cross_run_asvs(study, runs_spec, table, params)
 
+    missing_annotation && return json_error(404, "no_annotation_table",
+                                            "NMDS requires annotated '$table' tables for the selected runs")
     missing_seq && return json_error(400, "no_sequence_data",
-                                         "Table '$table' does not contain sequence data — select an ASV-level table (e.g. merged or asv_counts)")
+                                         "Table '$table' does not contain a DNA sequence column required for cross-run NMDS/PERMANOVA (expected `sequence` or `Sequence`, as in `merged` or `asv_counts`)")
     length(run_data) < 2 && return json_error(400, "too_few_runs",
                                                    "Need data from at least 2 runs for NMDS")
     mat, all_samples, _, _ = combined_asv_counts_across_runs(run_data)
@@ -436,10 +545,12 @@ end
     table = get(body, :table, "merged")
     params = _body_filter_params(body)
 
-    run_data, group_labels, run_labels, missing_seq = _collect_cross_run_asvs(study, runs_spec, table, params)
+    run_data, group_labels, run_labels, missing_seq, missing_annotation = _collect_cross_run_asvs(study, runs_spec, table, params)
 
+    missing_annotation && return json_error(404, "no_annotation_table",
+                                            "PERMANOVA requires annotated '$table' tables for the selected runs")
     missing_seq && return json_error(400, "no_sequence_data",
-                                         "Table '$table' does not contain sequence data — select an ASV-level table (e.g. merged or asv_counts)")
+                                         "Table '$table' does not contain a DNA sequence column required for cross-run NMDS/PERMANOVA (expected `sequence` or `Sequence`, as in `merged` or `asv_counts`)")
     length(run_data) < 2 && return json_error(400, "too_few_runs",
                                                    "Need data from at least 2 runs")
     mat, all_samples, _, _ = combined_asv_counts_across_runs(run_data)

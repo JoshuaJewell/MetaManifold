@@ -5,7 +5,7 @@ import { useJobRefetch } from '../hooks/useJobEvents'
 import { api } from '../api/client'
 import { Skeleton } from '../components/Skeleton'
 import { NameDialog } from '../components/NameDialog'
-import { CardActions } from '../components/CardActions'
+import { CardActions, RunCard } from '../components/CardActions'
 import { useToast } from '../components/Toast'
 import { ComparisonPanel } from '../components/ComparisonPanel'
 import type { ComparisonRunSpec, Run } from '../api/types'
@@ -209,41 +209,17 @@ export function StudyView() {
 
       {runs && runs.length > 0 && (
         <div className="card-grid">
-          {runs.map(run => {
-            const stages  = Object.values(run.stages ?? {}).filter(s => s.status !== 'disabled')
-            const done    = stages.filter(s => s.status === 'complete').length
-            const running = stages.filter(s => s.status === 'running').length
-            const stale   = stages.filter(s => s.status === 'stale').length
-            return (
-              <div key={run.name} className="study-card" style={{ display: 'flex', flexDirection: 'column' }}>
-                <Link
-                  to={`/${study}/${run.name}`}
-                  style={{ textDecoration: 'none', color: 'inherit', flex: 1 }}
-                >
-                  <h3>{run.name}</h3>
-                  <div className="meta">
-                    {run.sample_count} sample{run.sample_count !== 1 ? 's' : ''}
-                    {' - '}
-                    {done}/{stages.length} stages
-                    {running > 0 && (
-                      <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>
-                        {' - '}{running} running
-                      </span>
-                    )}
-                    {stale > 0 && (
-                      <span style={{ color: '#f59e0b', fontWeight: 600 }}>
-                        {' - '}{stale} stale
-                      </span>
-                    )}
-                  </div>
-                </Link>
-                <CardActions
-                  onRename={() => setDialog({ mode: 'rename-run', name: run.name })}
-                  onDelete={() => handleDeleteRun(run.name)}
-                />
-              </div>
-            )
-          })}
+          {runs.map(run => (
+            <RunCard
+              key={run.name}
+              name={run.name}
+              to={`/${study}/${run.name}`}
+              sampleCount={run.sample_count}
+              stages={run.stages}
+              onRename={() => setDialog({ mode: 'rename-run', name: run.name })}
+              onDelete={() => handleDeleteRun(run.name)}
+            />
+          ))}
         </div>
       )}
 

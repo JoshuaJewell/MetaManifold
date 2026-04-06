@@ -3,7 +3,7 @@ import { NavLink, Outlet, useParams } from 'react-router-dom'
 import { useApi } from '../hooks/useApi'
 import { useSSE } from '../hooks/useSSE'
 import { api } from '../api/client'
-import { createJobEventBus, JobEventContext } from '../hooks/useJobEvents'
+import { createJobEventBus, JobEventContext, SSEConnectedContext } from '../hooks/useJobEvents'
 import { Breadcrumb } from '../components/Breadcrumb'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import type { Job, StudySummary } from '../api/types'
@@ -33,7 +33,7 @@ export function Layout() {
     },
   }), [jobBus])
 
-  useSSE(sseHandlers)
+  const sseConnected = useSSE(sseHandlers)
 
   const studyFetcher = useCallback(
     () => study ? api.studies.get(study) : Promise.resolve(null),
@@ -120,10 +120,12 @@ export function Layout() {
 
       <main className="main-content">
         <JobEventContext.Provider value={jobBus}>
-          <Breadcrumb />
-          <ErrorBoundary>
-            <Outlet />
-          </ErrorBoundary>
+          <SSEConnectedContext.Provider value={sseConnected}>
+            <Breadcrumb />
+            <ErrorBoundary>
+              <Outlet />
+            </ErrorBoundary>
+          </SSEConnectedContext.Provider>
         </JobEventContext.Provider>
       </main>
     </div>

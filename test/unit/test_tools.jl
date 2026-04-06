@@ -1,5 +1,5 @@
 @testset "Tools - get_primer_args mode dispatch" begin
-    # Write a self-contained primers fixture — avoids depending on gitignored config/primers.yml
+    # Write a self-contained primers fixture - avoids depending on gitignored config/primers.yml
     primers_path = joinpath(tempdir(), "test_primers_$(getpid()).yml")
     write(primers_path, """
 Forward:

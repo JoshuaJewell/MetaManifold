@@ -4,9 +4,7 @@ module FuncDBAnnotation
 #
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
-export load_funcdb, annotate_table, append_funcdb_entry,
-       apply_contamination_filter!,
-       CONTAM_BLACKLIST_MAP, CONTAM_WHITELIST_MAP
+export load_funcdb, annotate_table, append_funcdb_entry
 
 using DataFrames, CSV, Logging, Dates
 
@@ -25,14 +23,14 @@ const FUNCDB_VALUE_COLS = (
 )
 
 const FUNCDB_OUTPUT_COLS = [
-    "funcdb_function",
-    "funcdb_detailed_function",
-    "funcdb_associated_organism",
-    "funcdb_associated_material",
-    "funcdb_environment",
-    "funcdb_potential_human_pathogen",
-    "funcdb_comment",
-    "funcdb_reference",
+    "function",
+    "detailed_function",
+    "assoc_organism",
+    "assoc_material",
+    "environment",
+    "human_pathogen",
+    "comment",
+    "reference",
 ]
 
 # Rank hierarchy from finest to coarsest.
@@ -54,28 +52,163 @@ const RANK_HIERARCHY = [
 const _RANK_INDEX = Dict(r.rank => i for (i, r) in enumerate(RANK_HIERARCHY))
 
 const VSEARCH_ONLY_COLS = Set([
-    "Pident", "Accession", "rRNA", "Organellum", "specimen", "sequence",
+    "Pident", "Accession", "rRNA", "Organellum", "specimen",
     "Domain", "Supergroup", "Division", "Subdivision", "Class", "Order",
     "Family", "Genus", "Species",
 ])
 
-const CONTAM_BLACKLIST_MAP = [
-    ("funcdb_function",            "annotation.contamination.blacklist.function"),
-    ("funcdb_detailed_function",   "annotation.contamination.blacklist.detailed_function"),
-    ("funcdb_associated_organism", "annotation.contamination.blacklist.associated_organism"),
-    ("funcdb_associated_material", "annotation.contamination.blacklist.associated_material"),
-    ("funcdb_environment",         "annotation.contamination.blacklist.environment"),
-]
 
-const CONTAM_WHITELIST_MAP = [
-    ("funcdb_function",            "annotation.contamination.whitelist.function"),
-    ("funcdb_detailed_function",   "annotation.contamination.whitelist.detailed_function"),
-    ("funcdb_associated_organism", "annotation.contamination.whitelist.associated_organism"),
-    ("funcdb_associated_material", "annotation.contamination.whitelist.associated_material"),
-    ("funcdb_environment",         "annotation.contamination.whitelist.environment"),
-]
+const _SUPPORTED_MAX_RANKS = Set(String[r.rank for r in RANK_HIERARCHY])
 
 ## Internal helpers
+
+# Detect integer sample-count columns from a DataFrame (excludes *_boot columns).
+function _sample_count_cols(df::DataFrame)
+    result = String[]
+    for col in names(df)
+        endswith(col, "_boot") && continue
+        T = nonmissingtype(eltype(df[!, col]))
+        T <: Integer && push!(result, col)
+    end
+    result
+end
+
+# Try to extract subgroup labels from sample column names.
+# Supports PRIMER-SUBGROUP-NUMBER (V4-C-06) and ID_TISSUE_METHOD (10c_m) patterns.
+# Returns Dict{subgroup => [col, ...]}; empty if no pattern matches.
+function _sample_subgroups(col_names::Vector{String})
+    subgroups = Dict{String,Vector{String}}()
+    # Pattern 1: dash-separated (V4-C-06)
+    for col in col_names
+        m = match(r"^[A-Za-z0-9]+-([A-Za-z]+)-\d+$", col)
+        isnothing(m) && continue
+        push!(get!(subgroups, m.captures[1], String[]), col)
+    end
+    !isempty(subgroups) && return subgroups
+    # Pattern 2: underscore-separated (10c_m) - subgroup is the letter before underscore
+    for col in col_names
+        m = match(r"^\d+([A-Za-z])_[A-Za-z]$", col)
+        isnothing(m) && continue
+        push!(get!(subgroups, uppercase(m.captures[1]), String[]), col)
+    end
+    subgroups
+end
+
+function _colsum(df::DataFrame, cols::Vector{String})
+    n = nrow(df)
+    totals = zeros(Int64, n)
+    for c in cols
+        col_vals = df[!, c]
+        for i in 1:n
+            v = col_vals[i]
+            ismissing(v) || (totals[i] += Int64(v))
+        end
+    end
+    totals
+end
+
+# Compute consensus rank by comparing VSEARCH and DADA2 taxonomy in source_df.
+# Returns a String vector with the finest rank where both methods agree ("species",
+# "genus", etc.) or "" if they never agree or one method is absent.
+function _compute_consensus_rank(source_df::DataFrame)
+    n = nrow(source_df)
+    consensus = fill("", n)
+    df_cols = Set(names(source_df))
+    pairs = [(r.rank, r.vsearch, r.dada2) for r in RANK_HIERARCHY
+             if r.vsearch in df_cols && r.dada2 in df_cols]
+    isempty(pairs) && return consensus
+
+    for i in 1:n
+        for (rank, vs_col, d2_col) in pairs   # finest -> coarsest
+            vs = _normalize_key(source_df[i, vs_col])
+            d2 = _normalize_key(source_df[i, d2_col])
+            (isempty(vs) || isempty(d2)) && continue
+            if vs == d2
+                consensus[i] = rank
+                break
+            end
+        end
+    end
+    consensus
+end
+
+# Extended rank index for bootstrap score: includes Domain (coarser than supergroup).
+const _SCORE_RANK_INDEX = merge(_RANK_INDEX, Dict("domain" => length(RANK_HIERARCHY) + 1))
+
+# Compute a 0-1 confidence score from bootstrap values and Pident.
+#
+# Formula:  score = mean_bootstrap / 100  *  pident / 100
+#
+# mean_bootstrap is the mean over ALL _boot columns present in the table.
+# Bootstrap values at ranks FINER than the consensus_rank are treated as 0,
+# so coarse consensus naturally produces a low score even when the bootstraps
+# at the consensus rank itself are high.
+#
+# Returns missing when consensus_rank is empty or no metrics exist.
+function _compute_consensus_score(source_df::DataFrame, consensus_rank::Vector{String})
+    n = nrow(source_df)
+    score = Vector{Union{Missing,Float64}}(missing, n)
+    col_names = names(source_df)
+    has_pident = "Pident" in col_names
+
+    # Discover all *_boot columns and map to rank index.
+    boot_info = Tuple{String,Int}[]   # (column_name, rank_index)
+    for col in col_names
+        endswith(col, "_boot") || continue
+        rank_name = lowercase(col[1:end-5])
+        idx = get(_SCORE_RANK_INDEX, rank_name, nothing)
+        isnothing(idx) && continue
+        push!(boot_info, (col, idx))
+    end
+
+    n_boot = length(boot_info)
+    (n_boot == 0 && !has_pident) && return score
+
+    for i in 1:n
+        cr = consensus_rank[i]
+        isempty(cr) && continue
+        cons_idx = get(_RANK_INDEX, cr, nothing)
+        isnothing(cons_idx) && continue
+
+        # Mean bootstrap: zero out ranks finer than consensus.
+        mean_boot = if n_boot > 0
+            boot_sum = 0.0
+            for (col, ridx) in boot_info
+                ridx >= cons_idx || continue          # finer -> 0
+                b = source_df[i, col]
+                (ismissing(b) || isnothing(b)) && continue
+                boot_sum += Float64(b)
+            end
+            boot_sum / n_boot                         # divide by ALL boot cols
+        else
+            100.0   # no bootstrap data -> assume 100 so score degrades to pident alone
+        end
+
+        pident = if has_pident
+            p = source_df[i, "Pident"]
+            (ismissing(p) || isnothing(p)) ? 100.0 : Float64(p)
+        else
+            100.0   # no pident -> assume 100 so score degrades to bootstrap alone
+        end
+
+        score[i] = round(mean_boot / 100.0 * pident / 100.0; digits=4)
+    end
+    score
+end
+
+# Append per-subgroup total columns and a grand total column to df in-place.
+# Uses integer-type detection for the grand total and name-pattern matching for subgroups.
+function _add_totals!(df::DataFrame)
+    all_cols = _sample_count_cols(df)
+    isempty(all_cols) && return
+
+    subgroups = _sample_subgroups(all_cols)
+    for sg in sort(collect(keys(subgroups)))
+        df[!, "total_$sg"] = _colsum(df, subgroups[sg])
+    end
+
+    df[!, "total"] = _colsum(df, all_cols)
+end
 
 """
     _normalize_key(val) -> String
@@ -162,13 +295,18 @@ Annotate a taxonomy DataFrame with FuncDB functional annotations.
 - Matching walks the rank hierarchy from species down to supergroup, using
   the first match found.
 - Columns from the other taxonomy source are dropped from the output.
-- Appends funcdb_* value columns plus `funcdb_match_rank`.
+- Appends funcdb_* value columns plus `match_rank`.
 """
-function annotate_table(source_df::DataFrame, taxonomy_source::String, funcdb_path::String)::DataFrame
+function annotate_table(source_df::DataFrame, taxonomy_source::String, funcdb_path::String;
+                        max_rank::String="species")::DataFrame
     taxonomy_source in ("VSEARCH", "DADA2") ||
         error("Invalid taxonomy_source: '$taxonomy_source'. Must be VSEARCH or DADA2.")
+    max_rank = lowercase(strip(max_rank))
+    max_rank in _SUPPORTED_MAX_RANKS ||
+        error("Invalid max_rank: '$max_rank'. Must be one of $(join(sort(collect(_SUPPORTED_MAX_RANKS)), ", ")).")
 
     merged_col_field = taxonomy_source == "VSEARCH" ? :vsearch : :dada2
+    max_rank_index = _RANK_INDEX[max_rank]
 
     maps = load_funcdb(funcdb_path)
 
@@ -183,7 +321,7 @@ function annotate_table(source_df::DataFrame, taxonomy_source::String, funcdb_pa
         matched_vals = nothing
         matched_rank = "unmatched"
 
-        for r in RANK_HIERARCHY
+        for r in RANK_HIERARCHY[max_rank_index:end]
             col = getfield(r, merged_col_field)
             # Skip if merged table doesn't have this rank column
             hasproperty(source_df, Symbol(col)) || continue
@@ -215,91 +353,31 @@ function annotate_table(source_df::DataFrame, taxonomy_source::String, funcdb_pa
     end
     isempty(drop) || select!(result, Not(drop))
 
+    finer_ranks = RANK_HIERARCHY[1:max(0, max_rank_index - 1)]
+    finer_cols = String[]
+    for r in finer_ranks
+        source_col = taxonomy_source == "VSEARCH" ? r.vsearch : r.dada2
+        push!(finer_cols, source_col)
+        taxonomy_source == "DADA2" && push!(finer_cols, replace(source_col, "_dada2" => "_boot"))
+    end
+    finer_cols = filter(c -> c in names(result), unique(finer_cols))
+    isempty(finer_cols) || select!(result, Not(finer_cols))
+
     # Append FuncDB value columns
     for (j, col_name) in enumerate(FUNCDB_OUTPUT_COLS)
         result[!, col_name] = out_vals[j]
     end
 
-    result[!, "funcdb_match_rank"] = match_rank
+    result[!, "match_rank"] = match_rank
+    cons_rank = _compute_consensus_rank(source_df)
+    result[!, "consensus_rank"]  = cons_rank
+    result[!, "consensus_score"] = _compute_consensus_score(source_df, cons_rank)
     result[!, "Contamination"] = fill("unassigned", nrows)
+    result[!, "BLAST Assignment"] = fill("", nrows)
+
+    _add_totals!(result)
 
     return result
-end
-
-"""
-    apply_contamination_filter!(df, resolved_cfg)
-
-Apply contamination and non-contamination auto-filters to `df` in-place.
-
-`resolved_cfg` is the flat dotted-key dict returned by `_resolve_config`, where
-each value is a NamedTuple with a `.value` field.
-- Contamination filter: row's funcdb field value is in the set -> `"yes"`
-- Non-contamination filter: row's funcdb field value is in the set -> `"no"`
-- If both filters match the same row, leave it `"unassigned"`
-Only rows currently `"unassigned"` are modified.
-"""
-function apply_contamination_filter!(df::DataFrame, resolved_cfg::Dict)
-    _val(key, default) = begin
-        entry = get(resolved_cfg, key, nothing)
-        isnothing(entry) ? default : entry.value
-    end
-
-    function _build_set(field_map)
-        Dict{String,Set{String}}(
-            col => begin
-                raw = _val(cfg_key, [])
-                items = raw isa AbstractVector ? raw : []
-                Set{String}(lowercase(strip(string(v))) for v in items
-                            if !isempty(strip(string(v))))
-            end
-            for (col, cfg_key) in field_map
-        )
-    end
-
-    blacklist_sets = _build_set(CONTAM_BLACKLIST_MAP)
-    whitelist_sets = _build_set(CONTAM_WHITELIST_MAP)
-
-    all(isempty(s) for s in values(blacklist_sets)) &&
-    all(isempty(s) for s in values(whitelist_sets)) && return
-
-    col_names = Set(names(df))
-    "Contamination" in col_names || return
-
-    for i in 1:nrow(df)
-        df[i, "Contamination"] == "unassigned" || continue
-
-        contamination_hit = false
-        for (col, _) in CONTAM_BLACKLIST_MAP
-            col in col_names || continue
-            isempty(blacklist_sets[col]) && continue
-            val = lowercase(strip(string(df[i, col])))
-            isempty(val) && continue
-            if val in blacklist_sets[col]
-                contamination_hit = true
-                break
-            end
-        end
-
-        non_contamination_hit = false
-        for (col, _) in CONTAM_WHITELIST_MAP
-            col in col_names || continue
-            isempty(whitelist_sets[col]) && continue
-            val = lowercase(strip(string(df[i, col])))
-            isempty(val) && continue
-            if val in whitelist_sets[col]
-                non_contamination_hit = true
-                break
-            end
-        end
-
-        if contamination_hit && non_contamination_hit
-            continue
-        elseif contamination_hit
-            df[i, "Contamination"] = "yes"
-        elseif non_contamination_hit
-            df[i, "Contamination"] = "no"
-        end
-    end
 end
 
 ## append_funcdb_entry
@@ -307,17 +385,19 @@ end
 """
     append_funcdb_entry(path, entry::Dict; modified_by="") -> NamedTuple
 
-Append a single entry to the FuncDB CSV file.
+Prepend a single entry to the FuncDB CSV file (inserted after the header).
+Newer entries at the top take precedence during annotation, so edits naturally
+override older rows without deleting them from the ledger.
 
 `entry` must contain at least one taxonomy key (Species, Genus, etc.) and at
-least `Main_function`. Missing columns default to empty strings.
+least `Function`. Missing columns default to empty strings.
 Returns a NamedTuple of the written row.
 """
 function append_funcdb_entry(path::String, entry::Dict; modified_by::String="")
     isfile(path) || error("FuncDB file not found: $path")
 
-    # Read the existing header to match column order exactly.
-    existing_cols = Symbol.(names(CSV.read(path, DataFrame; limit=0)))
+    existing = CSV.read(path, DataFrame; stringtype=String)
+    existing_cols = Symbol.(names(existing))
 
     # Build the row, filling missing keys with ""
     row = Dict{Symbol, String}()
@@ -333,10 +413,11 @@ function append_funcdb_entry(path::String, entry::Dict; modified_by::String="")
     has_taxon || error("Entry must have at least one taxonomy key")
     isempty(get(row, :Function, "")) && error("Entry must have Function")
 
-    df = DataFrame(; (col => [get(row, col, "")] for col in existing_cols)...)
-    CSV.write(path, df; append=true)
+    new_row = DataFrame(; (col => [get(row, col, "")] for col in existing_cols)...)
+    result = vcat(new_row, existing)
+    CSV.write(path, result)
 
-    @info "FuncDB entry appended" species=get(row, :Species, "") genus=get(row, :Genus, "") modified_by
+    @info "FuncDB entry prepended" species=get(row, :Species, "") genus=get(row, :Genus, "") modified_by
     return NamedTuple{Tuple(existing_cols)}(Tuple(get(row, c, "") for c in existing_cols))
 end
 

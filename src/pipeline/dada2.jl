@@ -103,9 +103,14 @@ export dada2, dada2_denoise, dada2_classify,
         trimmed_mtime = isempty(trimmed_files) ? 0.0 :
                         maximum(mtime(joinpath(trimmed.dir, f)) for f in trimmed_files)
 
+        ckpt_dir = joinpath(workspace_root, "Checkpoints")
         if isfile(chimera_ckpt) &&
-           mtime(chimera_ckpt) > mtime(config_path) &&
-           mtime(chimera_ckpt) > trimmed_mtime
+           mtime(chimera_ckpt) > trimmed_mtime &&
+           !_section_stale(config_path, stage_sections(:dada2_filter_trim), joinpath(ckpt_dir, "filter_trim.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_learn_errors), joinpath(ckpt_dir, "learn_errors.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_denoise), joinpath(ckpt_dir, "denoise.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_filter_length), joinpath(ckpt_dir, "filter_length.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_chimera_removal), joinpath(ckpt_dir, "chimera_removal.hash"))
             @info "[$(basename(dirname(workspace_root)))] DADA2: Skipping denoise - ckpt_chimera.RData up to date"
         else
             R"rm(list=ls())"
@@ -168,9 +173,15 @@ export dada2, dada2_denoise, dada2_classify,
         trimmed_files = filter(f -> endswith(f, "_trimmed.fastq.gz"), readdir(trimmed.dir))
         trimmed_mtime = isempty(trimmed_files) ? 0.0 :
                         maximum(mtime(joinpath(trimmed.dir, f)) for f in trimmed_files)
+        ckpt_dir = joinpath(workspace_root, "Checkpoints")
         if all(isfile, (result.fasta, result.count_table, result.taxonomy)) &&
-           all(f -> mtime(f) > mtime(config_path), (result.fasta, result.count_table, result.taxonomy)) &&
-           all(f -> mtime(f) > trimmed_mtime, (result.fasta, result.count_table, result.taxonomy))
+           all(f -> mtime(f) > trimmed_mtime, (result.fasta, result.count_table, result.taxonomy)) &&
+           !_section_stale(config_path, stage_sections(:dada2_filter_trim), joinpath(ckpt_dir, "filter_trim.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_learn_errors), joinpath(ckpt_dir, "learn_errors.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_denoise), joinpath(ckpt_dir, "denoise.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_filter_length), joinpath(ckpt_dir, "filter_length.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_chimera_removal), joinpath(ckpt_dir, "chimera_removal.hash")) &&
+           !_section_stale(config_path, stage_sections(:dada2_assign_taxonomy), joinpath(ckpt_dir, "assign_taxonomy.hash"))
             @info "[$(basename(project.dir))] DADA2: Skipping - outputs up to date in $tables_dir"
             return result
         end

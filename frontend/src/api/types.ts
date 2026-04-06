@@ -157,7 +157,9 @@ export interface ApplyPresetResult {
 
 export interface AnalysisRequest {
   table: string
+  source?: AnnotationSource
   colFilters?: Record<string, ColFilter>
+  prefix?: string | null
 }
 
 export interface TaxaBarRequest extends AnalysisRequest {
@@ -170,6 +172,7 @@ export interface ComparisonRunSpec {
   run: string
   group?: string | null
   prefix?: string | null
+  source?: AnnotationSource
 }
 
 /** Expand pooled runs into per-subgroup ComparisonRunSpecs. */
@@ -209,6 +212,33 @@ export interface AnnotationMeta {
   status:       'missing' | 'fresh' | 'stale'
   rows:         number | null
   generated_at: number | null
+}
+
+export interface CategoryInfo {
+  name:    string
+  colour?: string
+}
+
+export interface CategorySet {
+  name:        string
+  label:       string
+  description: string
+  categories:  CategoryInfo[]
+}
+
+export interface CompositionCategoryStats {
+  rows:          number
+  reads:         number
+  reads_percent: number
+}
+
+export interface CompositionBuildResult {
+  table:        string
+  source:       AnnotationSource
+  category_set: string
+  total_rows:   number
+  total_reads:  number
+  categories:   Record<string, CompositionCategoryStats>
 }
 
 export interface ContaminationStats {

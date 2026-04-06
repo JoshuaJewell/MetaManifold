@@ -1,18 +1,6 @@
 your_name: ""
 annotation:
-  contamination:
-    blacklist:
-      function: []
-      detailed_function: []
-      associated_organism: []
-      associated_material: []
-      environment: []
-    whitelist:
-      function: []
-      detailed_function: []
-      associated_organism: []
-      associated_material: []
-      environment: []
+  max_rank: "species"
 seed: 123
 subsample_n: 0
 pool_children: false
@@ -62,6 +50,7 @@ fastqc:
   threads: 20
   optional_args: ""
 analysis:
+  include_contamination: false
   alpha:
     annotate_significance: false
     metrics:

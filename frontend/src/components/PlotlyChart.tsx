@@ -9,9 +9,11 @@ interface PlotlySpec {
 interface Props {
   figure: unknown
   className?: string
+  /** Height as a ratio of container width (default 0.6). */
+  heightRatio?: number
 }
 
-export function PlotlyChart({ figure, className }: Props) {
+export function PlotlyChart({ figure, className, heightRatio = 0.6 }: Props) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -19,12 +21,12 @@ export function PlotlyChart({ figure, className }: Props) {
     const spec = figure as PlotlySpec
     Plotly.react(ref.current, spec.data ?? [], {
       autosize: true,
-      height: ref.current.clientWidth * 0.6,
+      height: ref.current.clientWidth * heightRatio,
       margin: { l: 60, r: 30, t: 40, b: 50 },
       ...spec.layout,
     }, { responsive: true, displaylogo: false })
     return () => { ref.current && Plotly.purge(ref.current) }
-  }, [figure])
+  }, [figure, heightRatio])
 
-  return <div ref={ref} className={className} style={{ width: '100%', aspectRatio: '5 / 3' }} />
+  return <div ref={ref} className={className} style={{ width: '100%' }} />
 }

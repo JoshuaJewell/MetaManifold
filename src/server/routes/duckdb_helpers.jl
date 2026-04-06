@@ -118,6 +118,88 @@ function _duckdb_rows(con, sql::String, params::Vector=[])
      for row in eachrow(df)]
 end
 
+## Distinct-value query (numeric or text)
+function _duckdb_distinct(con, table::String, column::String, body;
+                          extra_guard::Union{Function,Nothing}=nothing)
+    params = _body_filter_params(body)
+    columns = _duckdb_columns(con, table)
+
+    # Optional pre-check (e.g. for BLAST Assignment column that may not exist yet)
+    if !isnothing(extra_guard)
+        result = extra_guard(column, columns)
+        !isnothing(result) && return result
+    end
+
+    column in columns || return json_error(404, "column_not_found",
+                                           "Column '$column' not found")
+
+    (where, sql_params) = _build_where(params, columns)
+    num_sql = "SELECT MIN(TRY_CAST(\"$column\" AS DOUBLE)) AS mn,
+                      MAX(TRY_CAST(\"$column\" AS DOUBLE)) AS mx,
+                      COUNT(TRY_CAST(\"$column\" AS DOUBLE)) AS cnt,
+                      SUM(TRY_CAST(\"$column\" AS DOUBLE)) AS sm,
+                      AVG(TRY_CAST(\"$column\" AS DOUBLE)) AS avg,
+                      MEDIAN(TRY_CAST(\"$column\" AS DOUBLE)) AS med,
+                      QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.25) AS q1,
+                      QUANTILE_CONT(TRY_CAST(\"$column\" AS DOUBLE), 0.75) AS q3
+               FROM \"$table\" $where"
+    num_row = only(DataFrame(DBInterface.execute(con, num_sql, sql_params)))
+
+    if !ismissing(num_row.mn) && num_row.cnt > 0
+        return json((; column, type="numeric", min=num_row.mn, max=num_row.mx,
+                      count=num_row.cnt, sum=num_row.sm, mean=num_row.avg,
+                      median=num_row.med, q1=num_row.q1, q3=num_row.q3))
+    end
+
+    not_null = "\"$column\" IS NOT NULL"
+    full_where = isempty(where) ? "WHERE $not_null" : "$where AND $not_null"
+    limit_n = 1000
+    vals_sql = "SELECT DISTINCT CAST(\"$column\" AS VARCHAR) AS val
+                FROM \"$table\" $full_where
+                ORDER BY val
+                LIMIT $(limit_n + 1)"
+    vals_df = DataFrame(DBInterface.execute(con, vals_sql, sql_params))
+    truncated = nrow(vals_df) > limit_n
+    vals = String[string(row.val) for row in eachrow(vals_df[1:min(nrow(vals_df), limit_n), :])]
+    json((; column, type="text", values=vals, count=length(vals), truncated))
+end
+
+## Paginated table query
+function _duckdb_paginated_query(con, table::String, body;
+                                 select_expr::String="*",
+                                 response_columns::Union{Vector{String},Nothing}=nothing)
+    params = _body_filter_params(body)
+    page = max(1, Int(get(body, :page, 1)))
+    per_page = clamp(Int(get(body, :perPage, 100)), 1, 10_000)
+    sort_by = get(params, "sort", nothing)
+    sort_dir = get(params, "sort_dir", "asc")
+
+    columns = _duckdb_columns(con, table)
+    isempty(columns) && return json_error(404, "table_not_found",
+                                          "Table '$table' not found")
+
+    total_unfiltered = only(DataFrame(DBInterface.execute(
+        con, "SELECT COUNT(*) AS n FROM \"$table\""))).n
+
+    (where, sql_params) = _build_where(params, columns)
+    total = only(DataFrame(DBInterface.execute(
+        con, "SELECT COUNT(*) AS n FROM \"$table\" $where", sql_params))).n
+
+    count_cols = _sample_count_columns(con, table)
+    total_reads_unfiltered = _sum_reads(con, table, count_cols)
+    total_reads = _sum_reads(con, table, count_cols, where, sql_params)
+
+    out_columns = isnothing(response_columns) ? columns : response_columns
+    order = _order_clause(sort_by, sort_dir, out_columns)
+    offset = (page - 1) * per_page
+    rows = _duckdb_rows(con,
+        "SELECT $select_expr FROM \"$table\" $where $order LIMIT $per_page OFFSET $offset",
+        sql_params)
+
+    json((; total, total_unfiltered, total_reads, total_reads_unfiltered, page,
+            per_page, columns=out_columns, sample_count_columns=count_cols, rows))
+end
+
 ## Shared body parser
 
 function _body_filter_params(body)

@@ -61,6 +61,49 @@
         end
     end
 
+    @testset "taxonomy_levels - DADA2 suffixed columns" begin
+        db = DuckDB.DB()
+        con = DBInterface.connect(db)
+        try
+            DBInterface.execute(con, """
+                CREATE TABLE dada2_ann (
+                    SeqName VARCHAR,
+                    Genus_dada2 VARCHAR,
+                    Family_dada2 VARCHAR,
+                    s1 BIGINT
+                )
+            """)
+            levels = Analysis.taxonomy_levels(con, "dada2_ann")
+            # Returns canonical names (no _dada2 suffix)
+            @test "Genus"  in levels
+            @test "Family" in levels
+            @test "Genus_dada2"  ∉ levels
+            @test "Family_dada2" ∉ levels
+            @test "SeqName" ∉ levels
+        finally
+            DBInterface.close!(con)
+            close(db)
+        end
+    end
+
+    @testset "taxon_column" begin
+        vsearch_cols = ["SeqName", "Genus", "Family", "s1"]
+        dada2_cols   = ["SeqName", "Genus_dada2", "Family_dada2", "s1"]
+
+        @test Analysis.taxon_column(vsearch_cols, "Genus")  == "Genus"
+        @test Analysis.taxon_column(vsearch_cols, "Family") == "Family"
+        @test Analysis.taxon_column(dada2_cols,   "Genus")  == "Genus_dada2"
+        @test Analysis.taxon_column(dada2_cols,   "Family") == "Family_dada2"
+        # Falls back to plain name when neither exists
+        @test Analysis.taxon_column(vsearch_cols, "Order")  == "Order"
+    end
+
+    @testset "sequence_column_name" begin
+        @test Analysis.sequence_column_name(["SeqName", "sequence", "s1"]) == "sequence"
+        @test Analysis.sequence_column_name(["SeqName", "Sequence", "s1"]) == "Sequence"
+        @test isnothing(Analysis.sequence_column_name(["SeqName", "ASV", "s1"]))
+    end
+
     @testset "filtered_counts" begin
         db, con = _make_test_db()
         try
