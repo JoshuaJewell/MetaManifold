@@ -9,7 +9,6 @@ export load_funcdb, annotate_table, append_funcdb_entry
 using DataFrames, CSV, Logging, Dates
 
 ## Constants
-
 # FuncDB value columns to output column names.
 const FUNCDB_VALUE_COLS = (
     :Function,
@@ -61,7 +60,6 @@ const VSEARCH_ONLY_COLS = Set([
 const _SUPPORTED_MAX_RANKS = Set(String[r.rank for r in RANK_HIERARCHY])
 
 ## Internal helpers
-
 # Detect integer sample-count columns from a DataFrame (excludes *_boot columns).
 function _sample_count_cols(df::DataFrame)
     result = String[]
@@ -236,14 +234,13 @@ function _extract_values(row)
 end
 
 ## load_funcdb
-
 """
     load_funcdb(path) -> Dict{String, Dict{String, NamedTuple}}
 
 Load `FuncDB_species.csv` and build a lookup map per taxonomic rank.
 
 Returns a Dict mapping rank name (e.g. "species", "genus", "family") to a
-Dict of normalized taxon key to NamedTuple of FuncDB values.
+Dict of normalised taxon key to NamedTuple of FuncDB values.
 
 Duplicate species keys log a warning; duplicate keys at higher ranks are
 expected (many species per genus, etc.) and silently keep the first entry.
@@ -285,7 +282,6 @@ function load_funcdb(path::String)
 end
 
 ## annotate_table
-
 """
     annotate_table(source_df, taxonomy_source, funcdb_path) -> DataFrame
 
@@ -381,7 +377,6 @@ function annotate_table(source_df::DataFrame, taxonomy_source::String, funcdb_pa
 end
 
 ## append_funcdb_entry
-
 """
     append_funcdb_entry(path, entry::Dict; modified_by="") -> NamedTuple
 

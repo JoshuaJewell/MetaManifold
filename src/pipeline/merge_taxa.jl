@@ -11,6 +11,22 @@ using ..Config
 
 export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merge_taxa_otu, merge_taxa_dada2_only
 
+    # Return up to `limit` duplicated values from `vals`, formatted for an error
+    # message. Used by the uniqueness guard before the outer join in merge_taxa.
+    function _first_duplicates(vals; limit::Int=5)
+        seen = Set{eltype(vals)}()
+        dups = eltype(vals)[]
+        for v in vals
+            if v in seen
+                v in dups || push!(dups, v)
+                length(dups) >= limit && break
+            else
+                push!(seen, v)
+            end
+        end
+        return join(repr.(dups), ", ")
+    end
+
     # Import vsearch taxonomy
     function import_vsearch(file::AbstractString)
         rows = Vector{Vector{String}}()
@@ -194,6 +210,16 @@ export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merg
             rename!(df_counts_prepared,
                     [String(c) => String(c) * "_dada2" for c in overlap])
         end
+
+        # Outer joins on a non-unique key silently inflate per-sample counts
+        # for any duplicated ASV, which then propagates into richness, Shannon,
+        # Simpson, and Bray-Curtis. Fail loudly rather than scale silently.
+        allunique(df_taxonomy.SeqName) ||
+            error("merge_taxa: SeqName is not unique in taxonomy input " *
+                  "(duplicates: $(_first_duplicates(df_taxonomy.SeqName)))")
+        allunique(df_counts_prepared.SeqName) ||
+            error("merge_taxa: SeqName is not unique in counts input " *
+                  "(duplicates: $(_first_duplicates(df_counts_prepared.SeqName)))")
 
         # Full outer join to retain ASVs found by either method
         merged_df = outerjoin(df_taxonomy, df_counts_prepared, on="SeqName")

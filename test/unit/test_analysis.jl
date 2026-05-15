@@ -9,7 +9,6 @@
         @test length(c10) == 10
         @test allunique(c10)
 
-        # Base palette returned unchanged for small n
         c7 = Analysis._palette_hex(7)
         @test c7[1] == "#E69F00"
     end
@@ -26,7 +25,6 @@
         # 3-panel layout keys
         @test haskey(fig["layout"], "yaxis2") && haskey(fig["layout"], "yaxis3")
 
-        # Empty inputs produce a valid (but empty-data) chart
         fig_empty = Analysis.alpha_chart(String[], Int[], Float64[], Float64[])
         @test haskey(fig_empty, "data")
     end
@@ -39,7 +37,6 @@
         fig = Analysis.taxa_bar_chart(labels, samples, counts)
         @test haskey(fig, "data") && haskey(fig, "layout")
         @test fig["layout"]["barmode"] == "stack"
-        # 2 taxa -> 2 traces
         @test length(fig["data"]) == 2
 
         # Absolute mode
@@ -52,7 +49,6 @@
     end
 
     @testset "taxa_bar_chart top_n collapsing" begin
-        # More taxa than top_n -> extras collapsed into "Other"
         labels = ["T$i" for i in 1:20]
         samples = ["s1"]
         counts = Float64[i for i in 1:20] |> c -> reshape(c, 20, 1)
@@ -72,7 +68,6 @@
         @test fig["layout"]["barmode"] == "group"
         @test length(fig["data"]) == 2  # one bar series per sample
 
-        # Empty df -> nothing
         @test isnothing(Analysis.pipeline_stats_chart(DataFrame(sample=String[])))
     end
 
@@ -88,11 +83,9 @@
         @test !isempty(fig["layout"]["annotations"])
         @test occursin("stress", fig["layout"]["annotations"][1]["text"])
 
-        # No colour_by -> single trace
         fig2 = Analysis.nmds_chart(coords, labels)
         @test length(fig2["data"]) == 1
 
-        # Empty -> valid structure
         fig3 = Analysis.nmds_chart(zeros(0, 2), String[])
         @test haskey(fig3, "data")
     end
@@ -109,6 +102,33 @@
         # Only first panel traces show legend
         legend_traces = [t for t in fig["data"] if get(t, "showlegend", false)]
         @test length(legend_traces) == 2
+    end
+
+    @testset "pool_columns" begin
+        counts = [10.0 20.0 30.0 40.0;
+                   5.0 10.0 15.0 20.0]
+        names = ["A_s1", "A_s2", "B_s1", "B_s2"]
+
+        # Pool by prefix
+        pn, pc = Analysis.pool_columns(names, counts, ["A", "B"])
+        @test pn == ["A", "B"]
+        @test pc[:, 1] == [30.0, 15.0]   # A_s1 + A_s2
+        @test pc[:, 2] == [70.0, 35.0]   # B_s1 + B_s2
+
+        # Pool with unmatched -> Other
+        pn2, pc2 = Analysis.pool_columns(names, counts, ["A"])
+        @test pn2 == ["A", "Other"]
+        @test pc2[:, 1] == [30.0, 15.0]
+        @test pc2[:, 2] == [70.0, 35.0]
+
+        # Empty groups -> pool all
+        pn3, pc3 = Analysis.pool_columns(names, counts, String[])
+        @test pn3 == ["Total"]
+        @test pc3[:, 1] == [100.0, 50.0]
+
+        # Custom fallback label
+        pn4, _ = Analysis.pool_columns(names, counts, String[]; fallback_label="MyRun")
+        @test pn4 == ["MyRun"]
     end
 
 end

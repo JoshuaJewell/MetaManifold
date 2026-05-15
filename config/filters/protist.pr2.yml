@@ -1,4 +1,4 @@
-# Protist filter - retains free-living and parasitic protists.
+# Protist filter: retains free-living and parasitic protists.
 # Only applied when the active database is in the 'databases' list below.
 databases: [pr2]
 # Excludes: Bacteria, Archaea, organellar sequences, chromista sensu stricto,

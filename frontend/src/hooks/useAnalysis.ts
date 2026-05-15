@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import { errorMessage } from '../api/errorMessage'
@@ -15,6 +14,8 @@ export interface UseAnalysisOpts {
   source?: AnnotationSource
   colFilters?: Record<string, ColFilter>
   prefix?: string | null
+  /** Subgroup names for pool-by-group support. */
+  subgroups?: string[]
   /** When false, rank fetching is suppressed (e.g. table not yet ready). Default true. */
   enabled?: boolean
 }
@@ -27,6 +28,8 @@ export interface UseAnalysisResult {
   setRank: (rank: string | null) => void
   relative: boolean
   setRelative: (relative: boolean) => void
+  pool: boolean
+  setPool: (pool: boolean) => void
   alphaFig: unknown
   taxaFig: unknown
   loading: boolean
@@ -42,6 +45,7 @@ export function useAnalysis(opts: UseAnalysisOpts): UseAnalysisResult {
   const [ranks, setRanks]       = useState<string[]>([])
   const [rank, setRank]         = useState<string | null>(null)
   const [relative, setRelative] = useState(true)
+  const [pool, setPool]         = useState(false)
   const [alphaFig, setAlphaFig] = useState<unknown>(null)
   const [taxaFig, setTaxaFig]   = useState<unknown>(null)
   const [loading, setLoading]   = useState(false)
@@ -80,17 +84,20 @@ export function useAnalysis(opts: UseAnalysisOpts): UseAnalysisResult {
     if (!rank || !body) return
     setLoading(true)
     try {
+      const poolGroups = pool
+        ? (prefix ? [prefix] : (opts.subgroups ?? []))
+        : undefined
       setTaxaFig(await api.analysis.taxaBar(study, run,
-        { ...body, rank, top_n: 15, relative }, group))
+        { ...body, rank, top_n: 15, relative, pool, pool_groups: poolGroups }, group))
     } catch (err) {
       toast.error('Taxa bar failed: ' + (errorMessage(err)))
     } finally { setLoading(false) }
-  }, [body, group, rank, relative, run, study, toast])
+  }, [body, group, rank, relative, pool, prefix, opts.subgroups, run, study, toast])
 
   const resetFigures = useCallback(() => {
     setAlphaFig(null)
     setTaxaFig(null)
   }, [])
 
-  return { ranks, rank, setRank, relative, setRelative, alphaFig, taxaFig, loading, runAlpha, runTaxaBar, resetFigures }
+  return { ranks, rank, setRank, relative, setRelative, pool, setPool, alphaFig, taxaFig, loading, runAlpha, runTaxaBar, resetFigures }
 }

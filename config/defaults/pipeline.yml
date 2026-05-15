@@ -51,12 +51,10 @@ fastqc:
   optional_args: ""
 analysis:
   include_contamination: false
+  normalisation: none
+  normalisation_depth: 0
   alpha:
     annotate_significance: false
-    metrics:
-      - "richness"
-      - "shannon"
-      - "simpson"
     pairwise_brackets: false
     paired_samples: false
     show_points: true

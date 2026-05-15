@@ -1,3 +1,72 @@
+@testset "Tools - _parse_cdhit_clstr" begin
+    clstr_path = joinpath(tempdir(), "test_cdhit_$(getpid()).clstr")
+    write(clstr_path, """
+>Cluster 0
+0\t300nt, >seq1... *
+1\t295nt, >seq2... at 98.00%
+2\t290nt, >seq3... at 97.50%
+>Cluster 1
+0\t250nt, >seq4... *
+>Cluster 2
+0\t200nt, >seq5... at 99.00%
+1\t210nt, >seq6... *
+""")
+
+    try
+        rep_map = Tools._parse_cdhit_clstr(clstr_path)
+
+        @test rep_map["seq1"] == "seq1"
+        @test rep_map["seq2"] == "seq1"
+        @test rep_map["seq3"] == "seq1"
+        @test rep_map["seq4"] == "seq4"
+        @test rep_map["seq5"] == "seq6"
+        @test rep_map["seq6"] == "seq6"
+        @test length(rep_map) == 6
+    finally
+        rm(clstr_path; force=true)
+    end
+end
+
+@testset "Tools - _collapse_cdhit_counts" begin
+    td = mktempdir()
+    clstr_path = joinpath(td, "asvs.fasta.clstr")
+    counts_path = joinpath(td, "seqtab_nochim.csv")
+    out_path = joinpath(td, "collapsed_counts.csv")
+
+    write(clstr_path, """
+>Cluster 0
+0\t300nt, >seq1... *
+1\t295nt, >seq2... at 98.00%
+>Cluster 1
+0\t250nt, >seq3... *
+""")
+
+    write(counts_path, """
+SeqName,SampleA,SampleB
+seq1,10,20
+seq2,5,15
+seq3,100,200
+""")
+
+    try
+        Tools._collapse_cdhit_counts(clstr_path, counts_path, out_path)
+        df = CSV.read(out_path, DataFrame)
+
+        @test nrow(df) == 2
+        row1 = filter(r -> r.SeqName == "seq1", df)
+        @test nrow(row1) == 1
+        @test row1[1, :SampleA] == 15
+        @test row1[1, :SampleB] == 35
+
+        row3 = filter(r -> r.SeqName == "seq3", df)
+        @test nrow(row3) == 1
+        @test row3[1, :SampleA] == 100
+        @test row3[1, :SampleB] == 200
+    finally
+        rm(td; recursive=true, force=true)
+    end
+end
+
 @testset "Tools - get_primer_args mode dispatch" begin
     # Write a self-contained primers fixture - avoids depending on gitignored config/primers.yml
     primers_path = joinpath(tempdir(), "test_primers_$(getpid()).yml")

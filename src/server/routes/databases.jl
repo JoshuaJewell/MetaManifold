@@ -2,7 +2,6 @@
 # Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 # Routes: /api/v1/databases
-
 using JSON3, YAML
 
 function _db_info()

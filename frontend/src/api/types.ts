@@ -166,6 +166,15 @@ export interface TaxaBarRequest extends AnalysisRequest {
   rank?: string
   top_n?: number
   relative?: boolean
+  pool?: boolean
+  pool_groups?: string[]
+}
+
+export interface CrossRunTaxaBarRequest extends AnalysisRequest {
+  runs: ComparisonRunSpec[]
+  rank?: string
+  top_n?: number
+  relative?: boolean
 }
 
 export interface ComparisonRunSpec {
@@ -246,4 +255,21 @@ export interface ContaminationStats {
   no:         { rows: number; reads: number }
   unassigned: { rows: number; reads: number }
   total:      { rows: number; reads: number }
+}
+
+export interface VennSet {
+  name: string
+  taxa: string[]
+}
+
+export interface VennResult {
+  sets: VennSet[]
+  rank: string
+}
+
+export interface VennRequest {
+  runs: ComparisonRunSpec[]
+  table: string
+  rank: string
+  source?: AnnotationSource
 }

@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { useState, useEffect } from 'react'
 import type { RunStages, StageStatus, ConfigMap, ConfigSource } from '../api/types'
 import { api } from '../api/client'
@@ -38,7 +37,7 @@ export const STAGE_CONFIG_PREFIXES: Record<ConfigSection, string[]> = {
   swarm:          ['swarm.'],
   vsearch:        ['vsearch.'],
   annotation:     ['annotation.max_rank', 'annotation.contamination.'],
-  analysis:       ['analysis.include_contamination', 'analysis.alpha.', 'analysis.nmds.', 'analysis.taxa_bar.'],
+  analysis:       ['analysis.include_contamination', 'analysis.normalisation', 'analysis.normalisation_depth', 'analysis.alpha.', 'analysis.nmds.', 'analysis.taxa_bar.'],
 }
 
 const STAGE_ORDER = [...VISIBLE_STAGES]
@@ -110,8 +109,9 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'analysis.taxa_bar.rank':       'Taxonomic rank for bar plots; null = lowest assigned rank.',
   'analysis.taxa_bar.ranks':      'Rank levels to plot; null = auto (last 3 levels).',
   'analysis.taxa_bar.report_ranks':'Ranks to include in the report; null = auto (last 3 levels).',
-  'analysis.alpha.metrics':       'Alpha diversity metrics to compute.',
-  'analysis.include_contamination': 'Include rows marked as contamination in analysis outputs. When false, only annotation rows tagged "no" in Contamination are used.',
+'analysis.include_contamination': 'Include rows marked as contamination in analysis outputs. When false, only annotation rows tagged "no" in Contamination are used.',
+  'analysis.normalisation':       'Depth normalisation method applied before diversity and ordination analyses. rarefy randomly subsamples each sample to a common depth; none disables normalisation entirely.',
+  'analysis.normalisation_depth': 'Target library size for normalisation. Set to 0 to automatically use the minimum observed library size across the samples being analysed. Set a positive integer to use a fixed depth; samples with fewer reads than this value will be excluded from the analysis.',
   'analysis.alpha.show_points':   'Show individual samples overlaid on alpha comparison boxplots.',
   'analysis.alpha.annotate_significance': 'Annotate alpha comparison panels with Kruskal-Wallis significance.',
   'analysis.alpha.pairwise_brackets': 'Run BH-adjusted pairwise Wilcoxon rank-sum tests between every group pair and draw brackets, including n.s. results.',
@@ -204,6 +204,8 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'annotation.contamination.whitelist.associated_material': { kind: 'string_list' },
   'annotation.contamination.whitelist.environment':         { kind: 'string_list' },
   'analysis.include_contamination': { kind: 'boolean' },
+  'analysis.normalisation':       { kind: 'enum', options: ['none', 'rarefy'] },
+  'analysis.normalisation_depth': { kind: 'int' },
   'analysis.alpha.show_points':   { kind: 'boolean' },
   'analysis.alpha.annotate_significance': { kind: 'boolean' },
   'analysis.alpha.pairwise_brackets': { kind: 'boolean' },

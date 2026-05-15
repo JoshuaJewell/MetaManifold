@@ -1,4 +1,4 @@
-# Plants filter - retains Streptophyta and Chlorophyta (land plants + green algae).
+# Plants filter: retains Streptophyta and Chlorophyta (land plants + green algae).
 databases: [pr2]
 
 filters:

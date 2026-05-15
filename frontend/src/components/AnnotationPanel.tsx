@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { api } from '../api/client'
@@ -174,6 +173,7 @@ export function AnnotationPanel({ study, run, group, subgroups }: { study: strin
     table: selected,
     colFilters: filters,
     prefix: selectedSubgroup || undefined,
+    subgroups,
     enabled: analysisEnabled,
   })
 

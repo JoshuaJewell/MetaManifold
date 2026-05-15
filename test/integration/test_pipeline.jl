@@ -23,7 +23,7 @@
     PROJECT_ROOT = joinpath(@__DIR__, "..", "..")
     PROJECT_NAME = "MiSeq_SOP"
 
-    ## Check prerequisites -- fall back to committed CI configs if real ones absent
+    ## Check prerequisites; fall back to committed CI configs if real ones absent
     ci_config_dir = joinpath(PROJECT_ROOT, "config", "ci")
     tools_config = let p = joinpath(PROJECT_ROOT, "config", "tools.yml")
         isfile(p) ? p : joinpath(ci_config_dir, "tools.yml")

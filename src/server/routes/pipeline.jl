@@ -6,7 +6,6 @@
 # Every job begins by calling write_run_config() for the target run(s) so that
 # any config changes made in the UI are picked up before execution. The
 # existing checkpoint/hash logic then skips stages whose inputs are unchanged.
-
 using JSON3, RCall
 
 const _r_lock = ReentrantLock()
@@ -270,7 +269,6 @@ function _mergedtables_from_disk(run_dir::String)
 end
 
 ## Routes
-
 function _db_config_path()
     cfg = joinpath(dirname(ServerState.data_dir()), "config", "databases.yml")
     isfile(cfg) ? cfg : joinpath(dirname(ServerState.data_dir()), "config", "ci", "databases.yml")

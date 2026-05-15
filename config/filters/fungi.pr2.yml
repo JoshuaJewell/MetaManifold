@@ -1,4 +1,4 @@
-# Fungi filter - retains all fungal ASVs.
+# Fungi filter: retains all fungal ASVs.
 # PR2 taxonomy: Opisthokonta > Fungi > (Basidiomycota, Ascomycota,
 # Mucoromycota, Chytridiomycota, Blastocladiomycota, Neocallimastigomycota).
 databases: [pr2]

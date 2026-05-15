@@ -1,4 +1,4 @@
-# Host contamination filter - retains vertebrate sequences.
+# Host contamination filter: retains vertebrate sequences.
 # PR2 taxonomy: Subdivision=Metazoa > Class=Craniata.
 # Craniata covers all vertebrates (mammals, birds, fish, etc.).
 databases: [pr2]

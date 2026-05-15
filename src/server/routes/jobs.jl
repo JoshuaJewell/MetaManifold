@@ -2,7 +2,6 @@
 # Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 # Routes: /api/v1/jobs
-
 using JSON3
 
 function _job_to_namedtuple(j::Job)

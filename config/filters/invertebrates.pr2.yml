@@ -1,4 +1,4 @@
-# Invertebrates filter - retains non-vertebrate, non-helminth Metazoa.
+# Invertebrates filter: retains non-vertebrate, non-helminth Metazoa.
 # Keeps: Annelida, Arthropoda, Rotifera, Platyhelminthes (free-living),
 #        Miculenchus (moss-associated nematode), and other non-Craniata Metazoa.
 # Excludes Craniata (vertebrates/host) and parasitic nematodes (helminths filter).

@@ -1,4 +1,4 @@
-# Bacteria filter - retains all bacterial ASVs.
+# Bacteria filter: retains all bacterial ASVs.
 databases: [pr2]
 
 filters:

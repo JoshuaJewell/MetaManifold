@@ -6,7 +6,6 @@
 #
 # For integration tests (requires tools + databases):
 #   julia --project=. -t4 test/runtests.jl --integration
-
 using Test
 
 const RUN_INTEGRATION = "--integration" in ARGS

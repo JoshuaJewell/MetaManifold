@@ -35,6 +35,7 @@ export dada2, dada2_denoise, dada2_classify,
     using ..PipelineLog
     using ..Databases
     using ..Config
+    using ..Validation
 
     include("dada2/context.jl")   # shared helpers and _pipeline_context
     include("dada2/qc.jl")        # prefilter_qc, filter_trim

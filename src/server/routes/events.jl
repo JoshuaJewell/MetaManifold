@@ -5,7 +5,6 @@
 #
 # Uses Oxygen's @stream macro which passes an HTTP.Streams.Stream object,
 # allowing us to write SSE frames incrementally to the client.
-
 using HTTP
 
 @stream "/api/v1/events" function(stream::HTTP.Stream)

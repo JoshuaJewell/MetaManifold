@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "b9949dc026c66d2bc74787163d767b087d03ae77"
+project_hash = "e7c84cb4c927ffec8c0134c4675cef074e79ac93"
 
 [[deps.AliasTables]]
 deps = ["PtrArrays", "Random"]
@@ -416,7 +416,7 @@ uuid = "c8ffd9c3-330d-5841-b78e-0817d7145fa1"
 version = "2.28.1010+0"
 
 [[deps.MetaManifold]]
-deps = ["CSV", "DBInterface", "DataFrames", "Dates", "Downloads", "DuckDB", "HTTP", "JSON3", "Logging", "OrderedCollections", "Oxygen", "RCall", "SHA", "UUIDs", "XLSX", "YAML"]
+deps = ["CSV", "DBInterface", "DataFrames", "Dates", "Downloads", "DuckDB", "HTTP", "JSON3", "Logging", "OrderedCollections", "Oxygen", "PackageCompiler", "RCall", "Random", "SHA", "UUIDs", "XLSX", "YAML"]
 path = "."
 uuid = "ea959a01-5458-4cf1-8f0d-4ed45446c396"
 version = "0.0.0"

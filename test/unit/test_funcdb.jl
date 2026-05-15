@@ -112,7 +112,6 @@
             @test !haskey(maps["order"],   "eucoccidiorida")  # family-level entry not extended to order
             @test !haskey(maps["supergroup"], "alveolata")
 
-            # Values correct
             vals = maps["species"]["saccharomyces_cerevisiae"]
             @test vals.Function == "saprotroph"
             @test vals.Reference == "Ref1"

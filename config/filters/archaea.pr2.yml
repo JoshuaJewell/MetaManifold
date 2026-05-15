@@ -1,4 +1,4 @@
-# Archaea filter - retains all archaeal ASVs.
+# Archaea filter: retains all archaeal ASVs.
 databases: [pr2]
 
 filters:

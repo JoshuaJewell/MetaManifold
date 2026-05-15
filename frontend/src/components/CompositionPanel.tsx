@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import { errorMessage } from '../api/errorMessage'
@@ -25,35 +24,32 @@ export function CompositionPanel({
 }) {
   const toast = useToast()
 
-  // Source & category set selection
+  //## Source and category set selection
   const [source, setSource] = useState<AnnotationSource>('VSEARCH')
   const [categorySets, setCategorySets] = useState<CategorySet[]>([])
   const [selectedCatSet, setSelectedCatSet] = useState<string>('default')
   const [tables, setTables] = useState<TableMeta[]>([])
   const [selectedTable, setSelectedTable] = useState<string>('merged')
 
-  // Build state
+  //## Build state
   const [buildStatus, setBuildStatus] = useState<BuildStatus>('idle')
   const [buildResult, setBuildResult] = useState<CompositionBuildResult | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-
   // Quality filter: max unresolved _X count. -1 = disabled.
   const [maxX, setMaxX] = useState(-1)
 
-  // Analysis
+  //## Analysis
   const [compositionFig, setCompositionFig] = useState<unknown>(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
-
   // Subgroup filter for analysis
   const [selectedSubgroup, setSelectedSubgroup] = useState<string | null>(null)
-
-  // Category names + colours from the selected set
+  // Category names and colours from the selected set
   const activeCatSet = useMemo(
     () => categorySets.find(cs => cs.name === selectedCatSet) ?? null,
     [categorySets, selectedCatSet],
   )
   const categoryColourMap = useMemo(() => {
-    const map: Record<string, string> = { Other: '#95a5a6' }
+    const map: Record<string, string> = { Unassigned: '#95a5a6' }
     for (const c of activeCatSet?.categories ?? []) {
       if (c.colour) map[c.name] = c.colour
     }
@@ -112,13 +108,20 @@ export function CompositionPanel({
     [study, run, source, group],
   )
 
+  // Pool toggle
+  const [poolComposition, setPoolComposition] = useState(false)
+
   // Composition analysis chart
   const handleAnalysis = useCallback(async () => {
     setAnalysisLoading(true)
     try {
+      const poolGroups = poolComposition
+        ? (selectedSubgroup ? [selectedSubgroup] : (subgroups ?? []))
+        : undefined
       const fig = await api.composition.analysis(
         study, run, source, selectedCatSet,
         selectedSubgroup ?? undefined, group,
+        poolGroups,
       )
       setCompositionFig(fig)
     } catch (err) {
@@ -126,7 +129,7 @@ export function CompositionPanel({
     } finally {
       setAnalysisLoading(false)
     }
-  }, [study, run, source, selectedCatSet, selectedSubgroup, group, toast])
+  }, [study, run, source, selectedCatSet, selectedSubgroup, subgroups, poolComposition, group, toast])
 
   return (
     <div className="card">
@@ -177,7 +180,10 @@ export function CompositionPanel({
           Max X:
           <input
             type="number" min={-1} max={10} value={maxX}
-            onChange={e => setMaxX(parseInt(e.target.value) ?? -1)}
+            onChange={e => {
+              const n = parseInt(e.target.value, 10);
+              setMaxX(Number.isNaN(n) ? -1 : n);
+            }}
             style={{ width: 48, padding: '3px 6px', borderRadius: 4,
                      border: '1px solid var(--color-border)', fontSize: '.82rem' }}
           />
@@ -266,6 +272,10 @@ export function CompositionPanel({
                   {subgroups.map(sg => <option key={sg} value={sg}>{sg}</option>)}
                 </select>
               )}
+              <label style={{ fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input type="checkbox" checked={poolComposition} onChange={e => setPoolComposition(e.target.checked)} />
+                Pool
+              </label>
               <button
                 className="btn btn-primary"
                 onClick={handleAnalysis}

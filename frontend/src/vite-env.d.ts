@@ -13,6 +13,7 @@ declare module 'plotly.js-dist-min' {
       layout?: Record<string, unknown>,
       config?: Record<string, unknown>,
     ): Promise<void>
+    relayout(root: HTMLElement, update: Record<string, unknown>): Promise<void>
     purge(root: HTMLElement): void
     newPlot(
       root: HTMLElement,

@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import { errorMessage } from '../api/errorMessage'
 import { PlotlyChart } from './PlotlyChart'
+import { useAlphaMetricFilter, AlphaMetricToggles } from './alphaMetrics'
 import { useToast } from './Toast'
+import { VennPanel } from './VennPanel'
 import { discoverAnnotationOptions, type AnalysisOption } from './annotationShared'
 import type { ComparisonRunSpec, ColFilter, PermanovaResult } from '../api/types'
 
@@ -13,11 +15,15 @@ export function ComparisonPanel({ study, runs }: {
   const toast = useToast()
   const [alphaFig, setAlphaFig]       = useState<unknown>(null)
   const [nmdsFig, setNmdsFig]         = useState<unknown>(null)
+  const [taxaBarFig, setTaxaBarFig]   = useState<unknown>(null)
   const [permanova, setPermanova]     = useState<PermanovaResult | null>(null)
   const [loading, setLoading]         = useState<string | null>(null)
   const [options, setOptions]         = useState<AnalysisOption[]>([])
   const [analysisKey, setAnalysisKey] = useState<string | null>(null)
   const [rAvailable, setRAvailable]   = useState<boolean | null>(null)
+  const [ranks, setRanks]             = useState<string[]>([])
+  const [rank, setRank]               = useState<string | null>(null)
+  const [relative, setRelative]       = useState(true)
 
   useEffect(() => {
     api.analysis.capabilities().then(c => setRAvailable(c.r_available)).catch(() => setRAvailable(false))
@@ -59,14 +65,28 @@ export function ComparisonPanel({ study, runs }: {
   }, [study, runs])
 
   const selected = options.find(option => option.key === analysisKey) ?? null
+
+  // Fetch available taxonomy ranks from the first run.
+  useEffect(() => {
+    if (!selected || runs.length === 0) { setRanks([]); return }
+    const r = runs[0]
+    api.analysis.ranks(study, r.run, { table: selected.table, source: selected.source, group: r.group })
+      .then(result => {
+        setRanks(result)
+        setRank(current => current && result.includes(current) ? current : result[result.length - 1] ?? null)
+      })
+      .catch(() => setRanks([]))
+  }, [study, runs, selected])
   const body = selected ? { table: selected.table, source: selected.source, runs: runs.map(run => ({ ...run, source: selected.source })), colFilters: {} as Record<string, ColFilter> } : null
 
-  const run = async (type: 'alpha' | 'nmds' | 'permanova') => {
+  const run = async (type: 'alpha' | 'nmds' | 'permanova' | 'taxaBar') => {
     if (!body) return
     setLoading(type)
     try {
       if (type === 'alpha') {
         setAlphaFig(await api.analysis.compareAlpha(study, body))
+      } else if (type === 'taxaBar') {
+        setTaxaBarFig(await api.analysis.compareTaxaBar(study, { ...body, rank: rank!, relative }))
       } else if (type === 'nmds') {
         setNmdsFig(await api.analysis.nmds(study, body))
       } else {
@@ -78,6 +98,8 @@ export function ComparisonPanel({ study, runs }: {
       setLoading(null)
     }
   }
+
+  const { filtered: filteredAlpha, metrics, toggle } = useAlphaMetricFilter(alphaFig)
 
   if (runs.length < 2) return null
 
@@ -117,9 +139,32 @@ export function ComparisonPanel({ study, runs }: {
             {loading === 'permanova' ? 'Computing...' : 'PERMANOVA'}
           </button>
         )}
+
+        {ranks.length > 0 && body && (
+          <>
+            <select value={rank ?? ''} onChange={e => setRank(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--color-border)',
+                       fontSize: '.82rem', background: 'var(--color-bg)' }}>
+              {ranks.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <label style={{ fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input type="checkbox" checked={relative} onChange={e => setRelative(e.target.checked)} />
+              Relative
+            </label>
+            <button className="btn" onClick={() => run('taxaBar')} disabled={loading !== null || !rank}>
+              {loading === 'taxaBar' ? 'Computing...' : 'Taxa Bar'}
+            </button>
+          </>
+        )}
       </div>
 
-      {alphaFig != null && <PlotlyChart figure={alphaFig} heightRatio={0.48} />}
+      {alphaFig != null && (
+        <>
+          <AlphaMetricToggles metrics={metrics} toggle={toggle} />
+          <PlotlyChart figure={filteredAlpha} heightRatio={0.48} />
+        </>
+      )}
+      {taxaBarFig != null && <PlotlyChart figure={taxaBarFig} heightRatio={0.3} />}
       {nmdsFig != null && <PlotlyChart figure={nmdsFig} heightRatio={0.48} />}
       {permanova && (
         <div className="card" style={{ fontFamily: 'monospace', fontSize: '.82rem', whiteSpace: 'pre-wrap' }}>
@@ -132,6 +177,8 @@ export function ComparisonPanel({ study, runs }: {
           )}
         </div>
       )}
+
+      <VennPanel study={study} runs={runs} option={selected} />
     </div>
   )
 }

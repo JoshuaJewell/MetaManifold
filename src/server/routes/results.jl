@@ -1,7 +1,7 @@
 # © 2026 Joshua Benjamin Jewell. All rights reserved.
 # Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
-# Routes: results (plot catalog + Plotly JSON + table data)
+# Routes: results (plot catalogue + Plotly JSON + table data)
 
 using JSON3, CSV, DataFrames, OrderedCollections, YAML, XLSX, DuckDB, DBInterface
 
@@ -19,7 +19,7 @@ function _require_duckdb(study::String, run::String;
     dir
 end
 
-## Table catalog
+## Table catalogue
 @get "/api/v1/studies/{study}/runs/{run}/results/tables" function(req,
                                                                     study::String,
                                                                     run::String)
@@ -422,7 +422,6 @@ end
 end
 
 ## Delete a filter preset
-
 @delete "/api/v1/filter-presets/{name}" function(req, name::String)
     occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
         "Filter name must contain only letters, numbers, dots, hyphens, and underscores")

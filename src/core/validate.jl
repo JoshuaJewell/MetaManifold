@@ -4,11 +4,17 @@ module Validation
 #
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
-export validate_environment, validate_project, ValidationError
+export validate_environment, validate_project, ValidationError,
+       DENOVO_METHODS
 
     using YAML, Logging
     using ..PipelineTypes
     using ..Config
+
+    # Allowed chimera detection methods accepted by DADA2's removeBimeraDenovo.
+    # Kept here so configuration validation and the call-site guard in
+    # pipeline/dada2/chimera.jl share a single source of truth.
+    const DENOVO_METHODS = ("consensus", "pooled", "per-sample")
 
     struct ValidationError
         context::String
@@ -36,7 +42,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Tools Validation
-
     function _validate_tools(errors::Vector{ValidationError}, tools_config_path::String)
         ctx = "tools"
         isfile(tools_config_path) || begin
@@ -65,7 +70,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Database Validation
-
     function _validate_databases(errors::Vector{ValidationError}, databases_config_path::String)
         ctx = "databases"
         isfile(databases_config_path) || begin
@@ -97,7 +101,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Primers Validation
-
     function _validate_primers(errors::Vector{ValidationError}, primers_path::String)
         ctx = "primers ($primers_path)"
         isfile(primers_path) || begin
@@ -144,7 +147,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Pipeline Config Validation
-
     function _validate_pipeline_cfg(errors::Vector{ValidationError}, cfg::Dict, ctx::String)
         ca = get(cfg, "cutadapt", Dict())
         if ca isa Dict
@@ -179,9 +181,24 @@ export validate_environment, validate_project, ValidationError
                 isnothing(db) || db isa String ||
                     _err(errors, ctx, "dada2.taxonomy.database must be a string")
                 mb = get(tx, "multithread", nothing)
-                isnothing(mb) || (_is_number(mb) && mb >= 1) ||
-                    _err(errors, ctx, "dada2.taxonomy.multithread must be a positive integer")
+                # Accept either a Bool (DADA2's TRUE/FALSE meaning "all cores" /
+                # "single thread") or a strict positive Integer. Reject floats
+                # and strings explicitly so YAML's `true`, `4`, and `"4"` do not
+                # silently flip code paths in the R wrapper.
+                isnothing(mb) ||
+                    (mb isa Bool) ||
+                    (mb isa Integer && mb >= 1) ||
+                    _err(errors, ctx,
+                         "dada2.taxonomy.multithread must be a Bool or positive integer (got: $(repr(mb)))")
             end
+        end
+
+        asv = get(cfg, "asv", Dict())
+        if asv isa Dict
+            dm = get(asv, "denovo_method", nothing)
+            isnothing(dm) || (dm isa AbstractString && dm in DENOVO_METHODS) ||
+                _err(errors, ctx,
+                     "asv.denovo_method must be one of $(join(DENOVO_METHODS, ", ")) (got: $(repr(dm)))")
         end
 
         vs = get(cfg, "vsearch", Dict())
@@ -213,7 +230,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Per-project Validation
-
     """
         validate_project(project, databases_config_path) -> Vector{ValidationError}
 
@@ -271,7 +287,6 @@ export validate_environment, validate_project, ValidationError
     end
 
     ## Entry Point
-
     """
         validate_environment(projects, databases_config_path, tools_config_path)
 

@@ -1,4 +1,4 @@
-# Helminth filter - retains parasitic nematodes only.
+# Helminth filter: retains parasitic nematodes only.
 # Keeps Nematoda (Trichuris, Strongyloides) but excludes Miculenchus
 # (a moss-associated tylenchid, not a medical helminth).
 databases: [pr2]

@@ -141,6 +141,12 @@
         asv_file      = "asv_counts.csv"
         tables_dir    = ctx.dirs["Tables"]
         multithread   = get(ctx.cfg["taxonomy"], "multithread", 4)
+        # Guard the Julia/R boundary: YAML ambiguity between `true`, `4`, and
+        # `"4"` previously flipped the assignTaxonomy code path silently. Only
+        # a Bool or a strict positive Integer is meaningful here.
+        (multithread isa Bool) ||
+            (multithread isa Integer && multithread >= 1) ||
+            error("taxonomy.multithread must be a Bool or positive integer (got: $(repr(multithread)))")
         min_boot      = get(ctx.cfg["taxonomy"], "min_boot", 0)
         db_key    = string(ctx.cfg["taxonomy"]["database"])
         dbs_path  = joinpath(@__DIR__, "..", "..", "..", "config", "databases.yml")

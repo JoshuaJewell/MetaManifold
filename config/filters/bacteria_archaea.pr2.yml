@@ -1,4 +1,4 @@
-# Bacteria + Archaea filter - retains all prokaryotic ASVs.
+# Bacteria + Archaea filter: retains all prokaryotic ASVs.
 # Covers Bacteroidetes, Firmicutes, Tenericutes, Cyanobacteria, and
 # any Archaea if present.
 databases: [pr2]

@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useApi } from '../hooks/useApi'
 import type { TablePage, TableQuery, ColFilter, DistinctInfo } from '../api/types'

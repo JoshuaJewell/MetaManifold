@@ -2,7 +2,6 @@
 # Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 ## Chimera Removal
-
     """
         chimera_removal(config_path; progress)
 
@@ -12,6 +11,10 @@
 
     Review `Tables/pipeline_stats.csv` for unexpected read loss before
     committing to the (potentially long) `assign_taxonomy()` step.
+
+    The `asv.denovo_method` config key selects DADA2's chimera detection mode.
+    Allowed values are `"consensus"`, `"pooled"`, and `"per-sample"`; any
+    other value raises before R is invoked.
 
     Requires: `Checkpoints/ckpt_filter.RData`, `Checkpoints/ckpt_length.RData`
     Saves: `Checkpoints/ckpt_chimera.RData`
@@ -58,6 +61,12 @@
             emit("Removing chimeras")
             if has_data
                 denovo_method = ctx.cfg["asv"]["denovo_method"]
+                # Guard at the Julia/R boundary: an unrecognised method silently
+                # degrades downstream chimera calls and produces an opaque R
+                # error rather than a clear Julia validation failure.
+                denovo_method isa AbstractString && denovo_method in Validation.DENOVO_METHODS ||
+                    error("asv.denovo_method must be one of $(join(Validation.DENOVO_METHODS, ", ")) " *
+                          "(got: $(repr(denovo_method)))")
                 R"""
                 seq_table_nochim <- removeBimeraDenovo(seq_table, method=$denovo_method, verbose=$verbose)
                 nochim_pct <- sum(seq_table_nochim) / sum(seq_table) * 100

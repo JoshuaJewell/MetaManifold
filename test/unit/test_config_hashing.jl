@@ -15,7 +15,7 @@
         # Study == project (flat project)
         paths = Config._cascade_paths(config_dir, joinpath(dir, "data", "study"),
                                        joinpath(dir, "data", "study"))
-        @test length(paths) == 3  # defaults, config-level, study/project
+        @test length(paths) == 3
         @test paths[1] == joinpath(config_dir, "defaults", "pipeline.yml")
         @test paths[2] == joinpath(config_dir, "pipeline.yml")
 
@@ -31,22 +31,14 @@
     end
 
     @testset "_canonical deterministic ordering" begin
-        # Same data, different insertion order -> same canonical string
         d1 = Dict("b" => 2, "a" => 1)
         d2 = Dict("a" => 1, "b" => 2)
         @test Config._canonical(d1) == Config._canonical(d2)
 
-        # Nested dicts
         nested = Dict("x" => Dict("b" => 2, "a" => 1))
         @test Config._canonical(nested) == "{x:{a:1,b:2}}"
-
-        # Arrays
         @test Config._canonical([1, 2, 3]) == "[1,2,3]"
-
-        # Null
         @test Config._canonical(nothing) == "null"
-
-        # String
         @test Config._canonical("hello") == "hello"
     end
 
@@ -106,10 +98,8 @@
         write(cfg_path, "cutadapt:\n  min_length: 200\n  cores: 0\n")
         Config._write_section_hash(cfg_path, "cutadapt", hash_file)
 
-        # No changes -> empty
         @test isempty(Config._stale_keys(cfg_path, "cutadapt", hash_file))
 
-        # Change one key
         write(cfg_path, "cutadapt:\n  min_length: 150\n  cores: 0\n")
         changed = Config._stale_keys(cfg_path, "cutadapt", hash_file)
         @test "cutadapt.min_length" in changed
@@ -138,7 +128,7 @@
         write(hash_file, "somehash")
 
         result = Config._stale_keys(cfg_path, "cutadapt", hash_file)
-        @test result == ["cutadapt"]  # returns section names as fallback
+        @test result == ["cutadapt"]
 
         rm(dir; recursive=true)
     end

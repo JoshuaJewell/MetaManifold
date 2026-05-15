@@ -23,11 +23,9 @@ module Server
     using MetaManifold.DiversityMetrics, MetaManifold.Analysis
 
     ## EPIPE log filter
-    #
     # HTTP.jl logs every broken-pipe error from SSE streams as @error
     # "handle_connection handler error". These are harmless (client closed the
     # connection) but very noisy. Filter them before they reach the console.
-
     struct _SuppressEpipe{L<:AbstractLogger} <: AbstractLogger
         inner::L
     end
@@ -55,7 +53,6 @@ module Server
     end
 
     ## Server state
-
     module ServerState
         const _root = Ref{String}("")
         data_dir()     = joinpath(_root[], "data")
@@ -64,12 +61,10 @@ module Server
     end
 
     ## Job queue
-
     include(joinpath(@__DIR__, "jobs.jl"))
     using .JobQueue
 
     ## Shared helpers (available to all included route files)
-
     function json_error(status::Int, code::String, message::String; detail=nothing)
         body = isnothing(detail) ? (; error=code, message) : (; error=code, message, detail)
         HTTP.Response(status,
@@ -78,7 +73,6 @@ module Server
     end
 
     ## Routes
-
     include(joinpath(@__DIR__, "routes", "duckdb_helpers.jl"))
     include(joinpath(@__DIR__, "routes", "studies.jl"))
     include(joinpath(@__DIR__, "routes", "runs.jl"))
@@ -93,7 +87,6 @@ module Server
     include(joinpath(@__DIR__, "routes", "composition.jl"))
 
     ## CORS middleware (needed when the frontend is served from a different origin)
-
     function _cors_middleware(next)
         function(req::HTTP.Request)
             origin = HTTP.header(req, "Origin", "")
@@ -124,7 +117,6 @@ module Server
     end
 
     ## Static file serving (frontend build + on-demand PDFs)
-
     const _frontend_dir = joinpath(@__DIR__, "..", "..", "web", "dist")
     const _mime_map = Dict(
         ".html" => "text/html", ".js" => "application/javascript",
@@ -181,7 +173,6 @@ module Server
     end
 
     ## Entry point
-
     function start(; root=pwd(), host="127.0.0.1", port=8080, listen::Bool=true)
         global_logger(_SuppressEpipe(global_logger()))
         ServerState.set_root!(root)

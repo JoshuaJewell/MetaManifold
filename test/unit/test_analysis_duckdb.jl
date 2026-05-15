@@ -31,11 +31,9 @@
         try
             scols = Analysis.sample_columns(con, "merged")
             @test Set(scols) == Set(["s1", "s2", "s3"])
-            # Non-count columns excluded
             @test "SeqName" ∉ scols
             @test "Domain" ∉ scols
             @test "Pident" ∉ scols
-            # Suffixed columns excluded
             @test "Domain_dada2" ∉ scols
             @test "Pident_boot" ∉ scols
         finally
@@ -50,10 +48,8 @@
             levels = Analysis.taxonomy_levels(con, "merged")
             @test "Domain" in levels
             @test "Phylum" in levels
-            # Non-taxonomy columns excluded
             @test "SeqName" ∉ levels
             @test "s1" ∉ levels
-            # Domain comes before Phylum in the canonical order
             @test findfirst(==("Domain"), levels) < findfirst(==("Phylum"), levels)
         finally
             DBInterface.close!(con)
@@ -218,6 +214,126 @@
         bac_idx = findfirst(==("Bacteria"), taxa_labels)
         @test mat[1, bac_idx] == 50.0
         @test mat[3, bac_idx] == 0.0  # not in run_B
+    end
+
+    @testset "venn_taxa_present" begin
+        # Reuse _make_test_db() already defined at top of this testset.
+        # Schema: SeqName, Domain, Phylum, s1, s2, s3, Domain_dada2, Pident_boot
+        # Data:
+        #   seq1 -> Domain=Eukaryota, Phylum=Chlorophyta,    s1=100, s2=50, s3=0
+        #   seq2 -> Domain=Eukaryota, Phylum=Ochrophyta,     s1=30,  s2=80, s3=10
+        #   seq3 -> Domain=Bacteria,  Phylum=Proteobacteria, s1=0,   s2=20, s3=40
+        @testset "returns present taxa at Domain level" begin
+            db, con = _make_test_db()
+            try
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1", "s2", "s3"],
+                                                  "Domain", "", [])
+                @test Set(taxa) == Set(["Eukaryota", "Bacteria"])
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "returns present taxa at Phylum level" begin
+            db, con = _make_test_db()
+            try
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1", "s2", "s3"],
+                                                  "Phylum", "", [])
+                @test Set(taxa) == Set(["Chlorophyta", "Ochrophyta", "Proteobacteria"])
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "excludes taxa with zero reads in the given sample columns" begin
+            db, con = _make_test_db()
+            try
+                # s3 only: seq1 has 0 in s3, seq3 has 40 in s3
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s3"],
+                                                  "Domain", "", [])
+                @test "Bacteria" in taxa
+                # Eukaryota: seq1.s3=0, seq2.s3=10 -> total=10 -> still present
+                @test "Eukaryota" in taxa
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "zero reads for all taxa in column -> returns only those with reads" begin
+            db, con = _make_test_db()
+            try
+                # Only s1 for Bacteria row (seq3.s1 = 0) -> Bacteria absent, Eukaryota present
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1"],
+                                                  "Domain", "WHERE s3 = 0", [])
+                # seq1 (Eukaryota, s1=100) qualifies, seq3 (Bacteria, s1=0) does not
+                @test "Eukaryota" in taxa
+                @test "Bacteria" ∉ taxa
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "respects WHERE clause filter" begin
+            db, con = _make_test_db()
+            try
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1", "s2", "s3"],
+                                                  "Phylum", "WHERE Domain = ?", ["Eukaryota"])
+                @test Set(taxa) == Set(["Chlorophyta", "Ochrophyta"])
+                @test "Proteobacteria" ∉ taxa
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "empty sample_cols returns empty vector" begin
+            db, con = _make_test_db()
+            try
+                taxa = Analysis.venn_taxa_present(con, "merged", String[],
+                                                  "Domain", "", [])
+                @test isempty(taxa)
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "result is sorted" begin
+            db, con = _make_test_db()
+            try
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1", "s2", "s3"],
+                                                  "Domain", "", [])
+                @test taxa == sort(taxa)
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
+
+        @testset "null and blank taxa are coalesced to Unclassified" begin
+            db = DuckDB.DB()
+            con = DBInterface.connect(db)
+            try
+                DBInterface.execute(con, """
+                    CREATE TABLE merged (
+                        SeqName VARCHAR,
+                        Domain VARCHAR,
+                        s1 BIGINT
+                    )
+                """)
+                DBInterface.execute(con, """
+                    INSERT INTO merged VALUES
+                        ('seq1', 'Eukaryota', 100),
+                        ('seq2', NULL,         50),
+                        ('seq3', '',           30),
+                        ('seq4', '   ',        20)
+                """)
+                taxa = Analysis.venn_taxa_present(con, "merged", ["s1"],
+                                                  "Domain", "", [])
+                @test "Unclassified" in taxa
+                @test "Eukaryota" in taxa
+                @test length(taxa) == 2  # Eukaryota + Unclassified (NULL, '', '   ' all coalesced)
+            finally
+                DBInterface.close!(con); close(db)
+            end
+        end
     end
 
 end

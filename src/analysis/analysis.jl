@@ -4,14 +4,16 @@ module Analysis
 # Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 using DataFrames, JSON3, DuckDB, DBInterface, RCall
-using ..DiversityMetrics: richness, shannon, simpson
+using ..DiversityMetrics: richness, shannon, simpson, normalise_counts,
+                          auto_min_depth
 
 export sample_columns, filtered_counts, filtered_df, taxonomy_levels, taxon_column,
        aggregate_by_taxon, combined_counts_across_runs, combined_asv_counts_across_runs,
-       sequence_column_name, relativize_rows!,
+       sequence_column_name, pool_columns,
        alpha_chart, taxa_bar_chart, pipeline_stats_chart,
        alpha_boxplot, nmds_chart,
-       run_nmds, run_permanova, r_available
+       run_nmds, run_permanova, r_available,
+       venn_taxa_present
 
 ## DuckDB query helpers for analysis
 """
@@ -28,6 +30,7 @@ function sample_columns(con, table::String)
         "sequence", "OTU", "ASV",
         "Domain", "Supergroup", "Division", "Subdivision",
         "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species",
+        "consensus_score", "total",
     ])
     numeric_types = Set(["BIGINT", "INTEGER", "DOUBLE", "FLOAT", "HUGEINT", "SMALLINT", "TINYINT"])
     cols = String[]
@@ -38,6 +41,7 @@ function sample_columns(con, table::String)
         endswith(col, "_dada2") && continue
         endswith(col, "_boot") && continue
         endswith(col, "_vsearch") && continue
+        startswith(col, "total_") && continue
         dtype in numeric_types || continue
         push!(cols, col)
     end
@@ -144,6 +148,32 @@ function aggregate_by_taxon(con, table::String, sample_cols::Vector{String},
 end
 
 """
+    venn_taxa_present(con, table, sample_cols, rank_col, where_clause, where_params) -> Vector{String}
+
+Return sorted taxon names at `rank_col` that have at least one read
+summed across `sample_cols` after applying the given WHERE clause.
+Null/blank/whitespace-only taxon values are coalesced to "Unclassified".
+Returns an empty vector if `sample_cols` is empty.
+"""
+function venn_taxa_present(con, table::String, sample_cols::Vector{String},
+                           rank_col::String, where_clause::String,
+                           where_params::Vector)::Vector{String}
+    isempty(sample_cols) && return String[]
+    reads_expr = join(["SUM(COALESCE(\"$c\", 0))" for c in sample_cols], " + ")
+    sql = """
+        SELECT COALESCE(NULLIF(TRIM("$rank_col"), ''), 'Unclassified') AS taxon
+        FROM "$table"
+        $where_clause
+        GROUP BY taxon
+        HAVING ($reads_expr) > 0
+        ORDER BY taxon
+    """
+    df = DataFrame(DBInterface.execute(con, sql, where_params))
+    nrow(df) == 0 && return String[]
+    String.(df.taxon)
+end
+
+"""
     combined_counts_across_runs(run_data) -> (Matrix{Float64}, Vector{String}, Vector{String}, Vector{String})
 
 Build a combined taxonomy-aggregated count matrix across multiple runs for NMDS/PERMANOVA.
@@ -235,7 +265,6 @@ end
 
 ## Plotly chart builders
 # All functions return a Dict suitable for JSON3.write -> Plotly JSON.
-
 ## Colour palette
 function _palette_hex(n::Int)::Vector{String}
     base = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
@@ -281,7 +310,7 @@ function alpha_chart(sample_names::Vector{String},
     metrics = [
         ("y",  "x",  "Richness (observed ASVs)", Float64.(richness_values)),
         ("y2", "x2", "Shannon index",            shannon_values),
-        ("y3", "x3", "Simpson index",            simpson_values),
+        ("y3", "x3", "Gini-Simpson (1 - D)",       simpson_values),
     ]
     traces = [Dict{String,Any}(
         "type" => "bar", "x" => sample_names, "y" => vals,
@@ -294,12 +323,55 @@ function alpha_chart(sample_names::Vector{String},
         "grid" => Dict("rows" => 3, "columns" => 1, "pattern" => "independent"),
         "yaxis"  => Dict("title" => "Richness (observed ASVs)"),
         "yaxis2" => Dict("title" => "Shannon index"),
-        "yaxis3" => Dict("title" => "Simpson index"),
+        "yaxis3" => Dict("title" => "Gini-Simpson (1 - D)"),
         "xaxis"  => Dict("tickangle" => -45),
         "xaxis2" => Dict("tickangle" => -45),
         "xaxis3" => Dict("title" => "Sample", "tickangle" => -45),
     )
     Dict("data" => traces, "layout" => layout)
+end
+
+## Column pooling
+"""
+    pool_columns(sample_names, counts, groups) -> (Vector{String}, Matrix{Float64})
+
+Pool (sum) sample columns into summary columns by group prefix.
+
+Each group label in `groups` is matched against sample names via
+`startswith(name, group * "_")`.  Columns matching the same group are summed.
+Any unmatched columns are summed into an `"Other"` group.
+
+When `groups` is empty, all columns are summed into a single column named
+`fallback_label` (defaults to `"Total"`).
+
+`counts` is taxa-by-samples; the returned matrix has one column per group.
+"""
+function pool_columns(sample_names::Vector{String}, counts::Matrix{Float64},
+                      groups::Vector{String}; fallback_label::String="Total")
+    if isempty(groups)
+        return ([fallback_label], reshape(vec(sum(counts, dims=2)), :, 1))
+    end
+
+    pooled_names = String[]
+    pooled_cols  = Vector{Float64}[]
+    matched      = falses(length(sample_names))
+
+    for grp in groups
+        pfx  = grp * "_"
+        mask = [startswith(s, pfx) for s in sample_names]
+        any(mask) || continue
+        matched .|= mask
+        push!(pooled_cols, vec(sum(counts[:, mask], dims=2)))
+        push!(pooled_names, grp)
+    end
+
+    if any(.!matched)
+        push!(pooled_cols, vec(sum(counts[:, .!matched], dims=2)))
+        push!(pooled_names, "Other")
+    end
+
+    isempty(pooled_cols) && return ([fallback_label], reshape(vec(sum(counts, dims=2)), :, 1))
+    (pooled_names, reduce(hcat, pooled_cols))
 end
 
 ## Taxa bar chart
@@ -314,6 +386,17 @@ function taxa_bar_chart(taxon_labels::Vector{String},
                         counts::Matrix{Float64};
                         top_n::Int=15, relative::Bool=true)
     n_taxa = length(taxon_labels)
+
+    # Drop samples (columns) that contain no data before plotting.
+    col_totals = vec(sum(counts, dims=1))
+    empty_mask = col_totals .== 0
+    if any(empty_mask)
+        dropped = sample_names[empty_mask]
+        @info "Taxa bar: dropping $(length(dropped)) empty sample column(s)" samples=dropped
+        keep_cols = .!empty_mask
+        counts = counts[:, keep_cols]
+        sample_names = sample_names[keep_cols]
+    end
     n_samples = length(sample_names)
 
     totals = vec(sum(counts, dims=2))
@@ -545,7 +628,7 @@ function _add_pairwise_annotations!(layout::Dict{String,Any},
     min_val = minimum(all_vals)
     max_val = maximum(all_vals)
     span = max(max_val - min_val, 1.0)
-    step = 0.08 * span
+    step = 0.12 * span
     y = max_val + 0.12 * span
 
     shapes = get!(layout, "shapes", Any[])
@@ -578,10 +661,9 @@ function _add_pairwise_annotations!(layout::Dict{String,Any},
         push!(annotations, Dict{String,Any}(
             "xref" => "$xaxis_key domain", "yref" => yaxis_ref,
             "x" => center, "xanchor" => "center",
-            "y" => y + 0.015 * span,
+            "y" => y + 0.06 * span,
             "text" => "<b>$(_significance_stars(p))</b>",
             "showarrow" => false,
-            "font" => Dict("size" => 12),
         ))
         y += step
     end
@@ -602,7 +684,7 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
     panels = [
         ("y", "x", "yaxis", "y",  "Richness (observed ASVs)", 1),
         ("y2", "x2", "yaxis2", "y2", "Shannon index",          2),
-        ("y3", "x3", "yaxis3", "y3", "Simpson index",          3),
+        ("y3", "x3", "yaxis3", "y3", "Gini-Simpson (1 - D)",    3),
     ]
     traces = Any[]
     panel_annotations = Dict{Int, Vector{Dict{String,Any}}}()
@@ -660,7 +742,6 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
                 "text" => "$(paired_samples ? (length(unique(panel_labels)) == 2 ? "Paired Wilcoxon" : "Friedman") : "KW") $(_significance_stars(p_value))<br>$(_format_p_value(p_value))",
                 "showarrow" => false,
                 "align" => "right",
-                "font" => Dict("size" => 11),
             ))
             end
             pairwise_brackets && (panel_pairwise[panel_idx] = pairwise_df)
@@ -669,12 +750,13 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
     layout = Dict{String,Any}(
         "title" => Dict("text" => "Alpha diversity comparison"),
         "grid" => Dict("rows" => 3, "columns" => 1, "pattern" => "independent"),
+        "boxgap" => 0.3,
         "xaxis"  => Dict("type" => "category"),
         "xaxis2" => Dict("type" => "category"),
         "xaxis3" => Dict("type" => "category"),
         "yaxis"  => Dict("title" => "Richness (observed ASVs)"),
         "yaxis2" => Dict("title" => "Shannon index"),
-        "yaxis3" => Dict("title" => "Simpson index"),
+        "yaxis3" => Dict("title" => "Gini-Simpson (1 - D)"),
         "annotations" => reduce(vcat, values(panel_annotations); init=Any[]),
     )
     if pairwise_brackets
@@ -756,7 +838,7 @@ function nmds_chart(coords::Matrix{Float64}, labels::Vector{String};
             "xref" => "paper", "yref" => "paper",
             "x" => 0.02, "y" => 0.98,
             "xanchor" => "left", "yanchor" => "top",
-            "showarrow" => false, "font" => Dict("size" => 12),
+            "showarrow" => false,
         ))
     end
 
@@ -831,7 +913,8 @@ PERMANOVA via vegan::adonis2.
 """
 function run_permanova(mat::Matrix{Float64}, metadata::DataFrame; seed::Integer=123)
     _ensure_r() || return nothing
-    covariates = [c for c in names(metadata) if lowercase(c) != "sample"]
+    covariates = [c for c in names(metadata) if lowercase(c) != "sample" &&
+                      length(unique(metadata[!, c])) >= 2]
     isempty(covariates) && return nothing
     formula_rhs = join(covariates, " + ")
 

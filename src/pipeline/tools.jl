@@ -8,6 +8,8 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
 
     using YAML
     using SHA
+    using CSV
+    using DataFrames
     using Logging
     using ..PipelineTypes
     using ..PipelineLog
@@ -63,7 +65,6 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
     end
 
     ## Argument builders
-
     function _cutadapt_version(cutadapt_bin::AbstractString)
         try
             version = readchomp(`bash -lc $(cutadapt_bin * " --version")`)
@@ -607,6 +608,101 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
 
     ## cd-hit-est
     """
+        _parse_cdhit_clstr(clstr_path) -> Dict{String,String}
+
+    Parse a cd-hit `.clstr` file into a mapping of `member_id => representative_id`.
+    The representative in each cluster is the entry marked with `*`.
+    """
+    function _flush_cluster!(rep_map, cluster_seqs, rep)
+        isempty(cluster_seqs) && return
+        rep_local = something(rep, cluster_seqs[1])
+        for s in cluster_seqs
+            rep_map[s] = rep_local
+        end
+    end
+
+    function _parse_cdhit_clstr(clstr_path::String)::Dict{String,String}
+        rep_map = Dict{String,String}()
+        cluster_seqs = String[]
+        rep = nothing
+        pat = r">(.*?)\.\.\."
+
+        for line in eachline(clstr_path)
+            if startswith(line, ">Cluster")
+                _flush_cluster!(rep_map, cluster_seqs, rep)
+                cluster_seqs = String[]
+                rep = nothing
+                continue
+            end
+            m = match(pat, line)
+            isnothing(m) && continue
+            sid = strip(m.captures[1])
+            push!(cluster_seqs, sid)
+            if occursin('*', line)
+                rep = sid
+            end
+        end
+        _flush_cluster!(rep_map, cluster_seqs, rep)
+        return rep_map
+    end
+
+    """
+        _collapse_cdhit_counts(clstr_path, count_table_path, out_path) -> String
+
+    Read the cd-hit `.clstr` file and the DADA2 count table, sum sample counts
+    for ASVs that belong to the same cluster, and write the collapsed table to
+    `out_path`. Returns `out_path`.
+    """
+    function _first_nonmissing(col)
+        for v in skipmissing(col)
+            return v
+        end
+        return nothing
+    end
+
+    function _collapse_cdhit_counts(clstr_path::String, count_table_path::String,
+                                     out_path::String)::String
+        rep_map = _parse_cdhit_clstr(clstr_path)
+        df = copy(CSV.read(count_table_path, DataFrame))
+
+        id_col = names(df)[1]
+
+        df[!, :_Representative] = [get(rep_map, strip(string(v)), strip(string(v)))
+                                    for v in df[!, id_col]]
+
+        # Classify columns by first non-missing value type
+        sample_cols = String[]
+        text_cols = String[]
+        for col in names(df)
+            col in (id_col, "_Representative") && continue
+            v = _first_nonmissing(df[!, col])
+            if !isnothing(v) && v isa Number
+                push!(sample_cols, col)
+            else
+                push!(text_cols, col)
+            end
+        end
+
+        # Sum sample counts by representative
+        gdf = groupby(df, :_Representative)
+        collapsed = combine(gdf, [Symbol(c) => sum => Symbol(c) for c in sample_cols]...)
+        rename!(collapsed, :_Representative => id_col)
+
+        # Restore text metadata (e.g. sequence column) from the representative's own row
+        if !isempty(text_cols)
+            rep_meta = df[df[!, id_col] .== df[!, :_Representative],
+                          vcat([id_col], text_cols)]
+            unique!(rep_meta, id_col)
+            collapsed = leftjoin(collapsed, rep_meta, on=id_col)
+            collapsed = select(collapsed, id_col, text_cols..., sample_cols...)
+        end
+
+        CSV.write(out_path, collapsed)
+        @info "CD-HIT: Collapsed $(nrow(df)) ASVs -> $(nrow(collapsed)) representatives in $out_path"
+        return out_path
+    end
+
+    """
         cdhit(fasta_in, cdhit_dir; optional_args = "-c 0.9", cdhit_bin)
 
     Run cd-hit-est on a FASTA file, writing the clustered output to `cdhit_dir`.
@@ -637,12 +733,16 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
                    optional_args = "-c 0.9",
                    cdhit_bin     = tool_bin("cd_hit_est"))
         new_fasta = joinpath(cdhit_dir, basename(input.fasta))
-        if isfile(new_fasta) && mtime(new_fasta) > mtime(input.fasta)
+        collapsed_counts = joinpath(cdhit_dir, "collapsed_counts.csv")
+        if isfile(new_fasta) && isfile(collapsed_counts) &&
+           mtime(new_fasta) > mtime(input.fasta)
             @info "CD-HIT: Skipping - $new_fasta up to date"
-            return ASVResult(new_fasta, input.count_table, input.taxonomy)
+            return ASVResult(new_fasta, collapsed_counts, input.taxonomy)
         end
         new_fasta = cdhit(input.fasta, cdhit_dir; optional_args, cdhit_bin)
-        return ASVResult(new_fasta, input.count_table, input.taxonomy)
+        clstr_path = new_fasta * ".clstr"
+        _collapse_cdhit_counts(clstr_path, input.count_table, collapsed_counts)
+        return ASVResult(new_fasta, collapsed_counts, input.taxonomy)
     end
 
     function cdhit(project::ProjectCtx, input::ASVResult;
@@ -653,17 +753,20 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         built_args  = _cdhit_args(cfg)
         cdhit_dir   = joinpath(project.dir, "cdhit")
         new_fasta   = joinpath(cdhit_dir, basename(input.fasta))
+        collapsed_counts = joinpath(cdhit_dir, "collapsed_counts.csv")
         hash_file   = joinpath(cdhit_dir, "config.hash")
-        if isfile(new_fasta) &&
+        if isfile(new_fasta) && isfile(collapsed_counts) &&
            !_section_stale(config_path, stage_sections(:cdhit), hash_file) &&
            mtime(new_fasta) > mtime(input.fasta)
             @info "[$lbl] CD-HIT: Skipping - $new_fasta up to date"
-            return ASVResult(new_fasta, input.count_table, input.taxonomy)
+            return ASVResult(new_fasta, collapsed_counts, input.taxonomy)
         end
         new_fasta = cdhit(input.fasta, cdhit_dir; optional_args=built_args, cdhit_bin)
+        clstr_path = new_fasta * ".clstr"
+        _collapse_cdhit_counts(clstr_path, input.count_table, collapsed_counts)
         _write_section_hash(config_path, stage_sections(:cdhit), hash_file)
         pipeline_log(project, "cd-hit-est complete")
         log_written(project, new_fasta)
-        return ASVResult(new_fasta, input.count_table, input.taxonomy)
+        return ASVResult(new_fasta, collapsed_counts, input.taxonomy)
     end
 end

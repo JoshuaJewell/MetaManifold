@@ -1,5 +1,4 @@
 # Shared DuckDB query helpers used by results.jl and annotations.jl
-
 using JSON3, DataFrames, OrderedCollections, DuckDB, DBInterface
 
 ## DuckDB SQL helpers
@@ -201,7 +200,6 @@ function _duckdb_paginated_query(con, table::String, body;
 end
 
 ## Shared body parser
-
 function _body_filter_params(body)
     params = Dict{String,String}()
 

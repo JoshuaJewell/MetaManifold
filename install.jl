@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 #
-# Dependency installer for MetabarcodingPipeline
+# Dependency installer for MetaManifold
 #
 # Installs Julia deps, checks/downloads external CLI tools, and installs
 # required R packages. Writes resolved tool paths to config/tools.yml.
@@ -119,7 +119,7 @@ end
 function fetch_string(url::String)::Union{String,Nothing}
     try
         buf = IOBuffer()
-        Downloads.download(url, buf; headers=["User-Agent" => "MetabarcodingPipeline-installer"])
+        Downloads.download(url, buf; headers=["User-Agent" => "MetaManifold-installer"])
         String(take!(buf))
     catch e
         @warn "Could not fetch $url: $e"
@@ -148,8 +148,7 @@ function find_file_in_dir(dir::String, filename::String)::Union{String,Nothing}
     nothing
 end
 
-# Tool download functions
-
+## Tool download functions
 function download_vsearch()::String
     @info "Fetching latest vsearch release info from GitHub..."
     json = fetch_string("https://api.github.com/repos/torognes/vsearch/releases/latest")
@@ -694,7 +693,6 @@ function build_sysimage()
 end
 
 ## Preflight checks
-
 """Return true if the current process is running as root."""
 has_root() = try; ccall(:geteuid, Cuint, ()) == 0; catch; false; end
 
@@ -761,7 +759,7 @@ function main()
     if UPDATE_MODE || MODIFY_MODE
         println()
         println("+-------------------------------------------+")
-        println("|  MetabarcodingPipeline - Install Script   |")
+        println("|  MetaManifold - Install Script            |")
         println("+-------------------------------------------+")
         UPDATE_MODE && println("  Mode: UPDATE")
         MODIFY_MODE && println("  Mode: MODIFY")

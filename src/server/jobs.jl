@@ -5,7 +5,6 @@ module JobQueue
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 # In-memory job store. Single-user local server - no persistence needed.
-
     using Dates, UUIDs
 
 export Job, JobStatus, submit_job!, get_job, list_jobs, cancel_job!,
@@ -125,7 +124,6 @@ export Job, JobStatus, submit_job!, get_job, list_jobs, cancel_job!,
     end
 
     ## SSE helpers
-
     function subscribe_events()
         ch = Channel{String}(256)
         lock(_subscribers_lock) do

@@ -3,7 +3,6 @@
 
 # Routes: organism composition - category-based classification of ASVs/OTUs
 # for relative abundance analysis across broad organism groups.
-
 using JSON3, CSV, DataFrames, OrderedCollections, DuckDB, DBInterface, YAML
 
 const _COMPOSITION_TABLE = "composition"
@@ -86,7 +85,6 @@ function _build_quality_where(source::String, merged_cols_set::Set{String};
 end
 
 ## Helpers
-
 function _compositions_dir()
     joinpath(dirname(ServerState.projects_dir()), "config", "compositions")
 end
@@ -102,7 +100,6 @@ function _composition_db_path(study::String, run::String, source::String;
 end
 
 ## Category set loading
-
 function _load_category_set(name::String)
     dir = _compositions_dir()
     isdir(dir) || return nothing
@@ -268,14 +265,13 @@ function _build_category_case_when(categories::Vector, merged_col_set::Set{Strin
     end
 
     if isempty(branches)
-        return "'Other'"  # No categories defined - everything is Other
+        return "'Unassigned'"
     end
 
-    "CASE\n    " * join(branches, "\n    ") * "\n    ELSE 'Other'\nEND"
+    "CASE\n    " * join(branches, "\n    ") * "\n    ELSE 'Unassigned'\nEND"
 end
 
 ## Composition DuckDB management
-
 function _with_composition_db(f, study::String, run::String, source::String;
                               group::Union{String,Nothing}=nothing, readonly::Bool=true)
     db_path = _composition_db_path(study, run, source; group)
@@ -368,7 +364,7 @@ function _build_composition!(study::String, run::String, source::String,
     case_when = _build_category_case_when(categories, merged_col_set, ann_col_set, source)
 
     # 5. Build quality filter WHERE clause (always omit NA, optional max X)
-    quality_where = _build_quality_where(source, merged_col_set; omit_na=true, max_x)
+    quality_where = _build_quality_where(source, merged_col_set; omit_na=false, max_x)
 
     # 6. Build the carry columns (only those that actually exist in annotation)
     carry_cols = filter(c -> c in ann_col_set, _ANNOTATION_CARRY_COLS)
@@ -464,24 +460,23 @@ function _build_composition!(study::String, run::String, source::String,
 end
 
 ## Composition analysis (stacked bar chart)
-
 function _composition_chart(con, table::String, category_set_config::Dict;
-                            prefix::Union{String,Nothing}=nothing)
-    scols = Analysis.sample_columns(con, table)
-    if !isnothing(prefix)
-        scols = filter(s -> startswith(s, prefix * "_"), scols)
-    end
+                            prefix::Union{String,Nothing}=nothing,
+                            do_pool::Bool=false,
+                            pool_groups::Vector{String}=String[])
+    scols = _filter_by_prefix(Analysis.sample_columns(con, table), prefix)
     isempty(scols) && return json_error(400, "no_samples", "No sample columns found")
 
     categories_cfg = get(category_set_config, "categories", [])
     cat_names = [get(c, "name", "") for c in categories_cfg]
-    push!(cat_names, "Other")  # always include Other
+    # Always append the catch-all bucket so taxa matching no category remain represented
+    push!(cat_names, "Unassigned")
     colour_map = Dict{String,String}()
     for c in categories_cfg
         clr = get(c, "colour", nothing)
         !isnothing(clr) && (colour_map[get(c, "name", "")] = string(clr))
     end
-    colour_map["Other"] = "#95a5a6"
+    colour_map["Unassigned"] = "#95a5a6"
 
     # Aggregate sample counts by Category
     sum_exprs = join(["SUM(COALESCE(\"$c\", 0)) AS \"$c\"" for c in scols], ", ")
@@ -505,6 +500,12 @@ function _composition_chart(con, table::String, category_set_config::Dict;
     end
 
     isempty(cat_labels) && return json_error(400, "no_data", "All categories empty")
+
+    # Pool columns before relativization so proportions reflect true read totals.
+    if do_pool
+        scols, counts = Analysis.pool_columns(scols, counts, pool_groups;
+                                              fallback_label=something(prefix, "Total"))
+    end
 
     # Relativize per sample (column-wise)
     col_sums = vec(sum(counts, dims=1))
@@ -602,13 +603,18 @@ end
     body = JSON3.read(String(req.body))
     category_set = string(get(body, :category_set, "default"))
     prefix = let p = get(body, :prefix, nothing); isnothing(p) ? nothing : string(p) end
+    do_pool = Bool(get(body, :pool, false))
+    pool_groups_raw = let v = get(body, :pool_groups, nothing)
+        isnothing(v) ? String[] : String[string(g) for g in v]
+    end
 
     cat_config = _load_category_set(category_set)
     isnothing(cat_config) && return json_error(404, "category_set_not_found",
         "Category set '$category_set' not found")
 
     _with_composition_db(study, run, source; group) do con
-        fig = _composition_chart(con, _COMPOSITION_TABLE, cat_config; prefix)
+        fig = _composition_chart(con, _COMPOSITION_TABLE, cat_config;
+                                 prefix, do_pool, pool_groups=pool_groups_raw)
         fig isa HTTP.Response && return fig
         HTTP.Response(200, ["Content-Type" => "application/json"],
                       body=JSON3.write(fig))

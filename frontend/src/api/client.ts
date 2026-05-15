@@ -7,8 +7,9 @@ import type {
   DatabaseEntry,
   ApiError,
   AnnotationSource, AnnotationMeta, ContaminationStats,
-  AnalysisRequest, TaxaBarRequest, ComparisonRequest, PermanovaResult,
+  AnalysisRequest, TaxaBarRequest, CrossRunTaxaBarRequest, ComparisonRequest, PermanovaResult,
   CategorySet, CompositionBuildResult,
+  VennRequest, VennResult,
 } from './types'
 
 // Base URL for the backend API. Empty string means same-origin.
@@ -210,11 +211,15 @@ export const api = {
                    },
     compareAlpha:  (study: string, body: ComparisonRequest) =>
                      post<unknown>(`/api/v1/studies/${study}/analysis/alpha`, body),
+    compareTaxaBar:(study: string, body: CrossRunTaxaBarRequest) =>
+                     post<unknown>(`/api/v1/studies/${study}/analysis/taxa-bar`, body),
     nmds:          (study: string, body: ComparisonRequest) =>
                      post<unknown>(`/api/v1/studies/${study}/analysis/nmds`, body),
     permanova:     (study: string, body: ComparisonRequest) =>
                      post<PermanovaResult>(`/api/v1/studies/${study}/analysis/permanova`, body),
     capabilities:  () => get<{ r_available: boolean }>('/api/v1/capabilities'),
+    venn:          (study: string, body: VennRequest) =>
+                     post<VennResult>(`/api/v1/studies/${study}/analysis/venn`, body),
   },
 
   annotations: {
@@ -270,10 +275,12 @@ export const api = {
         `/api/v1/studies/${study}/runs/${run}/composition/${source}/distinct/${column}${gq(group)}`,
         activeFilters ? { colFilters: activeFilters } : {}),
     analysis: (study: string, run: string, source: AnnotationSource,
-               categorySet?: string, prefix?: string | null, group?: string | null) =>
+               categorySet?: string, prefix?: string | null, group?: string | null,
+               poolGroups?: string[]) =>
       post<unknown>(
         `/api/v1/studies/${study}/runs/${run}/composition/${source}/analysis${gq(group)}`,
-        { category_set: categorySet ?? 'default', prefix }),
+        { category_set: categorySet ?? 'default', prefix,
+          pool: poolGroups && poolGroups.length > 0, pool_groups: poolGroups }),
   },
 
   databases: {

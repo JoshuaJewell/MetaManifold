@@ -1,7 +1,7 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import { PlotlyChart } from './PlotlyChart'
+import { useAlphaMetricFilter, AlphaMetricToggles } from './alphaMetrics'
 import type { UseAnalysisResult } from '../hooks/useAnalysis'
 
 interface AnalysisControlsProps extends UseAnalysisResult {
@@ -11,10 +11,12 @@ interface AnalysisControlsProps extends UseAnalysisResult {
 }
 
 export function AnalysisControls({
-  ranks, rank, setRank, relative, setRelative,
+  ranks, rank, setRank, relative, setRelative, pool, setPool,
   alphaFig, taxaFig, loading, runAlpha, runTaxaBar,
   body, children,
 }: AnalysisControlsProps) {
+  const { filtered: filteredAlpha, metrics, toggle } = useAlphaMetricFilter(alphaFig)
+
   return (
     <div style={{ marginTop: 24 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
@@ -35,6 +37,10 @@ export function AnalysisControls({
               <input type="checkbox" checked={relative} onChange={e => setRelative(e.target.checked)} />
               Relative
             </label>
+            <label style={{ fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input type="checkbox" checked={pool} onChange={e => setPool(e.target.checked)} />
+              Pool
+            </label>
             <button className="btn" onClick={runTaxaBar} disabled={loading || !rank}>
               Taxa Bar
             </button>
@@ -42,7 +48,12 @@ export function AnalysisControls({
         )}
       </div>
 
-      {alphaFig != null && <PlotlyChart figure={alphaFig} heightRatio={0.48} />}
+      {alphaFig != null && (
+        <>
+          <AlphaMetricToggles metrics={metrics} toggle={toggle} />
+          <PlotlyChart figure={filteredAlpha} heightRatio={0.48} />
+        </>
+      )}
       {taxaFig != null && <PlotlyChart figure={taxaFig} heightRatio={0.3} />}
     </div>
   )

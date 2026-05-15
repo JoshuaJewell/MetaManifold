@@ -1,15 +1,25 @@
 @testset "merge_taxa helpers" begin
 
+    @testset "_first_duplicates" begin
+        @test TaxonomyTableTools._first_duplicates(["a", "b", "c"]) == ""
+        @test TaxonomyTableTools._first_duplicates(["a", "b", "a"]) == "\"a\""
+        # A duplicate is reported only once even if it appears many times.
+        @test TaxonomyTableTools._first_duplicates(["a", "a", "a"]) == "\"a\""
+        # The limit caps the number reported.
+        many = ["x$i" for i in 1:10]
+        repeated = vcat(many, many)
+        out = TaxonomyTableTools._first_duplicates(repeated; limit=3)
+        @test count(==(','), out) == 2  # three entries => two commas
+    end
+
     @testset "seqnum" begin
         @test TaxonomyTableTools.seqnum("seq1")   == 1
         @test TaxonomyTableTools.seqnum("seq10")  == 10
         @test TaxonomyTableTools.seqnum("seq100") == 100
         @test TaxonomyTableTools.seqnum("otu1")   == 1
         @test TaxonomyTableTools.seqnum("otu42")  == 42
-        # Non-matching strings sort to end
         @test TaxonomyTableTools.seqnum("other")  == typemax(Int)
         @test TaxonomyTableTools.seqnum(missing)  == typemax(Int)
-        # Ordering is consistent with sort
         ids = ["seq3", "seq1", "seq10", "seq2"]
         @test sort(ids, by=TaxonomyTableTools.seqnum) == ["seq1", "seq2", "seq3", "seq10"]
     end
@@ -27,8 +37,7 @@
         @test df.SeqName == ["seq1", "seq2"]
         @test df.Pident  ≈ [95.5, 88.0]
 
-        # Short rows are skipped
-        df2 = TaxonomyTableTools.vsearch_to_df([["seq1", "tax"]])  # only 2 fields
+        df2 = TaxonomyTableTools.vsearch_to_df([["seq1", "tax"]])
         @test nrow(df2) == 0
     end
 
@@ -222,6 +231,43 @@ filters:
         @test df[df.SeqName .== "seq1", :Domain][1] == "Bacteria"
         @test df[df.SeqName .== "seq1", :Phylum][1] == "Firmicutes"
         @test sum(skipmissing(df[!, :sample1])) == 130
+    end
+
+    @testset "merge_taxonomy_counts - rejects duplicate SeqName in taxonomy" begin
+        db = DatabaseMeta("silva", ["Domain","Phylum"], "silva",
+                          Dict{String,Any}[], Set{String}())
+
+        vsearch_tmp = tempname() * ".tsv"
+        # seq1 appears twice in the vsearch input. The outer join would
+        # otherwise silently inflate seq1's per-sample counts.
+        write(vsearch_tmp,
+            "seq1\tBacteria;Firmicutes\t95.0\n" *
+            "seq1\tBacteria;Bacteroidetes\t90.0\n" *
+            "seq2\tBacteria;Proteobacteria\t88.0\n")
+
+        counts_tmp = tempname() * ".csv"
+        write(counts_tmp, "SeqName,sample1\nseq1,100\nseq2,30\n")
+
+        @test_throws ErrorException TaxonomyTableTools.merge_taxonomy_counts(
+            vsearch_tmp, counts_tmp, db)
+        rm(vsearch_tmp); rm(counts_tmp)
+    end
+
+    @testset "merge_taxonomy_counts - rejects duplicate SeqName in counts" begin
+        db = DatabaseMeta("silva", ["Domain","Phylum"], "silva",
+                          Dict{String,Any}[], Set{String}())
+
+        vsearch_tmp = tempname() * ".tsv"
+        write(vsearch_tmp,
+            "seq1\tBacteria;Firmicutes\t95.0\n" *
+            "seq2\tBacteria;Proteobacteria\t88.0\n")
+
+        counts_tmp = tempname() * ".csv"
+        write(counts_tmp, "SeqName,sample1\nseq1,100\nseq1,50\nseq2,30\n")
+
+        @test_throws ErrorException TaxonomyTableTools.merge_taxonomy_counts(
+            vsearch_tmp, counts_tmp, db)
+        rm(vsearch_tmp); rm(counts_tmp)
     end
 
     @testset "merge_taxonomy_counts - parent_X fill" begin

@@ -1,6 +1,5 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
-
 import type { CSSProperties } from 'react'
 import type { AnnotationMeta, AnnotationSource, ConfigSource } from '../api/types'
 import { api } from '../api/client'

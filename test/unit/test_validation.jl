@@ -98,6 +98,52 @@ Pairs: []
         @test any(e -> occursin("primer_pairs", e.message), errors)
     end
 
+    @testset "_validate_pipeline_cfg - denovo_method whitelist" begin
+        # Valid values pass.
+        for v in Validation.DENOVO_METHODS
+            cfg = Dict(
+                "cutadapt" => Dict("primer_pairs" => ["EMP"], "min_length" => 200),
+                "asv"      => Dict("denovo_method" => v),
+            )
+            errors = Validation.ValidationError[]
+            Validation._validate_pipeline_cfg(errors, cfg, "test")
+            @test !any(e -> occursin("denovo_method", e.message), errors)
+        end
+
+        # An unrecognised method (the canonical scenario: capitalised typo) is rejected.
+        cfg = Dict(
+            "cutadapt" => Dict("primer_pairs" => ["EMP"], "min_length" => 200),
+            "asv"      => Dict("denovo_method" => "Consensus"),
+        )
+        errors = Validation.ValidationError[]
+        Validation._validate_pipeline_cfg(errors, cfg, "test")
+        @test any(e -> occursin("denovo_method", e.message), errors)
+    end
+
+    @testset "_validate_pipeline_cfg - multithread accepts Bool and positive Integer" begin
+        for v in (true, false, 1, 4)
+            cfg = Dict(
+                "cutadapt" => Dict("primer_pairs" => ["EMP"], "min_length" => 200),
+                "dada2"    => Dict("taxonomy" => Dict("multithread" => v)),
+            )
+            errors = Validation.ValidationError[]
+            Validation._validate_pipeline_cfg(errors, cfg, "test")
+            @test !any(e -> occursin("multithread", e.message), errors)
+        end
+    end
+
+    @testset "_validate_pipeline_cfg - multithread rejects string and float" begin
+        for v in ("4", 4.0, 0)
+            cfg = Dict(
+                "cutadapt" => Dict("primer_pairs" => ["EMP"], "min_length" => 200),
+                "dada2"    => Dict("taxonomy" => Dict("multithread" => v)),
+            )
+            errors = Validation.ValidationError[]
+            Validation._validate_pipeline_cfg(errors, cfg, "test")
+            @test any(e -> occursin("multithread", e.message), errors)
+        end
+    end
+
     @testset "validate_environment - missing tools config" begin
         n = Validation.validate_environment(
             ProjectCtx[],

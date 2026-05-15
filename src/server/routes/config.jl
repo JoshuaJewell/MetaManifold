@@ -3,21 +3,11 @@
 
 # Routes: /api/v1/studies/{study}/config
 #         /api/v1/studies/{study}/runs/{run}/config
-
 using JSON3, YAML
 
 const _config_file_lock = ReentrantLock()
 
 ## Config resolution
-
-# Returns the merged config cascade for a run as a flat dict of dotted keys,
-# each annotated with its effective value and source level.
-#
-# Cascade order (lowest wins): default -> study -> group -> run
-#
-# "source" is the deepest level that explicitly sets the key.
-# Keys not set at any user level have source "default".
-
 function _load_yml(path::String)
     isfile(path) ? something(YAML.load_file(path), Dict()) : Dict()
 end
@@ -41,6 +31,13 @@ function _default_cfg(root::String)
     merge(factory, global_)  # global overrides factory; factory provides all keys
 end
 
+# Returns the merged config cascade for a run as a flat dict of dotted keys,
+# each annotated with its effective value and source level.
+#
+# Cascade order (lowest wins): default -> study -> group -> run
+#
+# "source" is the deepest level that explicitly sets the key.
+# Keys not set at any user level have source "default".
 function _resolve_config(study::String, run::Union{String,Nothing}=nothing,
                          group::Union{String,Nothing}=nothing)
     root        = dirname(ServerState.data_dir())
@@ -69,7 +66,7 @@ function _resolve_config(study::String, run::Union{String,Nothing}=nothing,
 end
 
 ## Allowed config keys - derived from defaults/pipeline.yml at load time.
-## Only keys present in the factory defaults can be set via the API.
+# Only keys present in the factory defaults can be set via the API.
 const _ALLOWED_CONFIG_KEYS = let
     factory_path = joinpath(@__DIR__, "..", "..", "..", "config", "defaults", "pipeline.yml")
     isfile(factory_path) ? Set(keys(_flatten(_load_yml(factory_path)))) : Set{String}()
@@ -128,7 +125,6 @@ function _delete_override(path::String, dotted_key::String)
 end
 
 ## Routes
-
 # Default (global) config endpoints
 @get "/api/v1/config" function(req)
     root = dirname(ServerState.data_dir())
@@ -205,7 +201,6 @@ end
 end
 
 ## Override indicators - which downstream entities override a given level's keys
-
 # Returns { "dotted.key": ["group1", "run1", ...] } for each study-level key
 # that has a group or run override.
 @get "/api/v1/studies/{study}/config/overrides" function(req, study::String)
@@ -254,7 +249,6 @@ end
 end
 
 ## Group config endpoints
-
 @get "/api/v1/studies/{study}/groups/{group}/config" function(req, study::String, group::String)
     study in _study_names() || return json_error(404, "study_not_found",
                                                      "Study '$study' not found")

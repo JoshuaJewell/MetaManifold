@@ -3,7 +3,6 @@
 
 # Routes: functional annotation (FuncDB) for listing, generation, querying,
 # distinct-value lookup, and contamination tagging.
-
 using JSON3, CSV, DataFrames, OrderedCollections, DuckDB, DBInterface, Dates
 
 const FUNCDB_PATH = joinpath(dirname(dirname(dirname(@__DIR__))), "databases", "FuncDB_species.csv")
@@ -71,43 +70,42 @@ function _with_annotation_db(f, study::String, run::String, source::String;
     isfile(ann_db_path) || return json_error(404, "no_annotations",
                                              "No annotation database found for $source")
 
+    # Open the DB. Only failures HERE (unreadable/corrupt file) justify
+    # destroying and rebuilding it from CSV; application errors from `f(con)`
+    # must NOT trigger a rebuild, or unrelated bugs would silently clobber any
+    # annotations that live in the DuckDB but have not been re-synced to CSV.
+    local db, con
     try
         db = DuckDB.DB(ann_db_path; readonly)
         con = DBInterface.connect(db)
-        try
-            f(con)
-        finally
-            DBInterface.close!(con)
-            close(db)
-        end
     catch e
-        # Attempt to rebuild a corrupt DB from CSV files.
         ann_dir = _annotation_dir(study, run, source; group)
         csvs = filter(f -> endswith(f, ".csv"), readdir(ann_dir; join=true))
         isempty(csvs) && rethrow()
-        @warn "Annotation DB corrupt, rebuilding from CSV" ann_db_path exception=(e, catch_backtrace())
+        @warn "Annotation DB unreadable, rebuilding from CSV" ann_db_path exception=(e, catch_backtrace())
         rm(ann_db_path; force=true)
-        db = DuckDB.DB(ann_db_path)
-        con = DBInterface.connect(db)
+        rebuild_db  = DuckDB.DB(ann_db_path)
+        rebuild_con = DBInterface.connect(rebuild_db)
         try
             for csv_path in csvs
                 tname = basename(csv_path)[1:end-4]
-                DBInterface.execute(con,
+                DBInterface.execute(rebuild_con,
                     "CREATE OR REPLACE TABLE \"$(tname)\" AS SELECT * FROM read_csv_auto('$(csv_path)', auto_detect=true, types={'Contamination': 'VARCHAR', '$(BLAST_ASSIGNMENT_COLUMN)': 'VARCHAR'})")
             end
         finally
-            DBInterface.close!(con)
-            close(db)
+            DBInterface.close!(rebuild_con)
+            close(rebuild_db)
         end
-        # Retry the original operation with the rebuilt DB.
-        db = DuckDB.DB(ann_db_path; readonly)
+        # Reopen in the caller's requested mode.
+        db  = DuckDB.DB(ann_db_path; readonly)
         con = DBInterface.connect(db)
-        try
-            f(con)
-        finally
-            DBInterface.close!(con)
-            close(db)
-        end
+    end
+
+    try
+        f(con)
+    finally
+        DBInterface.close!(con)
+        close(db)
     end
 end
 

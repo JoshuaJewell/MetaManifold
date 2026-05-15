@@ -1,6 +1,5 @@
 /* © 2026 Joshua Benjamin Jewell. All rights reserved. */
 /* Licensed under the GNU Affero General Public License version 3 (AGPLv3). */
-
 .wrapper { display: flex; flex-direction: column; gap: 8px; }
 
 .toolbar {
@@ -33,8 +32,7 @@
   font-size:       .85rem;
 }
 
-/* Header cells */
-
+/*## Header cells */
 .table th {
   position:      sticky;
   top:           0;
@@ -72,8 +70,7 @@
 .dropdownBtn:hover        { background: var(--color-surface); color: var(--color-fg); }
 .dropdownBtnActive        { color: var(--color-primary); font-weight: 700; border-color: var(--color-primary); }
 
-/* Dropdown popover */
-
+/*## Dropdown popover */
 .dropdown {
   position:       absolute;
   top:            100%;
@@ -152,8 +149,7 @@
   padding: 6px 8px;
 }
 
-/* Numeric filter */
-
+/*## Numeric filter */
 .numericInfo {
   padding:    6px 8px 2px;
   font-size:  .75rem;
@@ -189,8 +185,7 @@
   font-family:   inherit;
 }
 
-/* Table body */
-
+/*## Table body */
 .table td {
   padding:        6px 12px;
   border-bottom:  1px solid var(--color-border-light);
@@ -229,8 +224,7 @@
 .pager button:hover:not(:disabled) { background: var(--color-surface); }
 .pager button:disabled { opacity: .4; cursor: default; }
 
-/* BLAST link */
-
+/*## BLAST link */
 .blastCell { text-align: center; cursor: default; }
 .blastLink {
   font-size:       .72rem;
@@ -244,8 +238,7 @@
 }
 .blastLink:hover { background: var(--color-primary); color: #fff; }
 
-/* Row popup (OTU to ASV members) */
-
+/*## Row popup (OTU to ASV members) */
 .popupActiveRow td { background: var(--color-surface) !important; }
 
 .popup {
