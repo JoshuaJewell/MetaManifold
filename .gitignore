@@ -199,6 +199,16 @@ poetry.toml
 pyrightconfig.json
 
 ### R ###
+# renv project library and caches: large, machine-specific, and reproducible
+# from renv.lock. Commit only the lockfile, the activation script, and renv
+# settings; leave the installed packages on disk untracked.
+renv/library/
+renv/local/
+renv/staging/
+renv/lock/
+renv/python/
+renv/sandbox/
+
 # History files
 .Rhistory
 .Rapp.history

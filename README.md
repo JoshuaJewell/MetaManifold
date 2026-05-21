@@ -59,11 +59,11 @@ All analysis charts are returned as Plotly JSON and rendered interactively in th
 
 ## Prerequisites
 
-- **Julia** >= 1.0 - installed automatically by `install.sh` if missing
-- **R** >= 4.0 - required for the DADA2 stage and NMDS/PERMANOVA analysis
+- **Julia** >= 1.0 (installed automatically by `install.sh` if missing)
+- **R** >= 4.0 (required for the DADA2 stage and NMDS/PERMANOVA analysis)
   - Ubuntu/Debian: `sudo apt install r-base`
   - macOS: `brew install r` or [CRAN package](https://cran.r-project.org/bin/macosx/)
-- **bun** or **Node.js** - for building the frontend (bun preferred)
+- **bun** or **Node.js** for building the frontend (bun preferred)
 
 ## Installation
 
@@ -79,6 +79,21 @@ To update:
 ```bash
 bash install.sh --update
 ```
+
+### Reproducing the R environment
+
+The R-side dependencies (DADA2, vegan, and their transitive packages) are
+pinned with [`renv`](https://rstudio.github.io/renv/). The lockfile lives at
+`renv.lock` and a project-local library is created on first activation.
+
+```bash
+Rscript -e 'if (!requireNamespace("renv", quietly=TRUE)) install.packages("renv", repos="https://cloud.r-project.org"); renv::restore(prompt = FALSE)'
+```
+
+Subsequent invocations of `Rscript` or `R` from the repository root will pick
+up the project library automatically via the committed `.Rprofile`. To add or
+upgrade a package, install it inside the project (`renv::install(...)`) and
+record the change with `renv::snapshot()`.
 
 ### Tool paths
 
@@ -118,13 +133,13 @@ julia --project=. src/server/server.jl
 
 ## Configuration
 
-Pipeline settings use a cascade: each level overrides the one above it, and any key you omit is inherited from the nearest ancestor. The fully merged result is written to `run_config.yml` at runtime - that is the single place to see exactly what was used for a run.
+Pipeline settings use a cascade: each level overrides the one above it, and any key you omit is inherited from the nearest ancestor. The fully merged result is written to `run_config.yml` at runtime; that is the single place to see exactly what was used for a run.
 
 Settings can be edited in the web UI (per-study, per-group, or per-run) or as YAML files directly.
 
 | File | Purpose |
 |------|---------|
-| `config/defaults/` | Canonical defaults for every setting - do not edit |
+| `config/defaults/` | Canonical defaults for every setting; do not edit |
 | `config/filters/` | Directory of taxonomic filter configs |
 | `config/databases.yml` | Database URIs and optional local paths |
 | `config/primers.yml` | Primer sequences and pair definitions |
@@ -133,7 +148,7 @@ Settings can be edited in the web UI (per-study, per-group, or per-run) or as YA
 | `data/{name}/pipeline.yml` | Study-level overrides |
 | `data/{name}/{group}/pipeline.yml` | Group-level overrides (intermediate directories) |
 | `data/{name}/{run}/pipeline.yml` | Run-level overrides (highest precedence) |
-| `projects/{name}/{run}/run_config.yml` | Generated merged config (provenance) - do not edit |
+| `projects/{name}/{run}/run_config.yml` | Generated merged config (provenance); do not edit |
 
 Each `pipeline.yml` stub is created with a comment block explaining that level's role. Write only the keys you want to change; omit the rest.
 
@@ -197,14 +212,12 @@ cutadapt:
 
 ### Configuring DADA2 (`dada2:` in `pipeline.yml`)
 
-> **Performance tip:** For large datasets and reference databases, consider installing my [optimised DADA2 fork](https://github.com/JoshuaJewell/dada2) in place of the standard Bioconductor package. It provides CPU and Nvidia CUDA GPU acceleration for taxonomy assignment with no API or config changes required. This fork is experimental - if you encounter unexpected results, the standard Bioconductor release should be considered the reference implementation. Ultimately, I had to offload `assignTaxonomy()` to a remote server (`taxonomy.remote` setting).
-
 ```yaml
 dada2:
   file_patterns:
     mode: "paired"               # paired | forward | reverse
 
-  # Filter and trim - DADA2's filterAndTrim():
+  # Filter and trim; DADA2's filterAndTrim():
   filter_trim:
     trunc_q: 2
     trunc_len: [220, 220]        # [forward, reverse]; first value used for single-end mode
@@ -214,14 +227,14 @@ dada2:
     match_ids: true
     rm_phix: true
 
-  # Denoising - learnErrors() and dada():
+  # Denoising; learnErrors() and dada():
   dada:
     seed: 123
     nbases: 200000000
     max_consist: 15
     pool_method: "pseudo"        # none | pseudo | true
 
-  # Merging - mergePairs(), paired mode only:
+  # Merging; mergePairs(), paired mode only:
   merge:
     min_overlap: 20
     max_mismatch: 0
@@ -233,7 +246,7 @@ dada2:
     band_size_max: 430
     denovo_method: "consensus"   # consensus | pooled | per-sample
 
-  # Taxonomy - assignTaxonomy() against the configured database:
+  # Taxonomy; assignTaxonomy() against the configured database:
   taxonomy:
     database: pr2                # key into config/databases.yml
     multithread: 4               # threads for assignTaxonomy(); higher values increase memory use
@@ -268,9 +281,9 @@ dada2:
 | `asvs.fasta` / `asvs.csv` | ASV sequences with short identifiers (seq1, seq2, ...) |
 | `taxonomy.csv`            | Taxonomy assignments per ASV                           |
 | `taxonomy_bootstraps.csv` | Bootstrap confidence values per rank                   |
-| `taxonomy_combined.csv`   | Taxonomy + bootstrap columns combined                  |
-| `tax_counts.csv`          | Taxonomy + per-sample counts                           |
-| `asv_counts.csv`          | ASV sequences + per-sample counts (no taxonomy)        |
+| `taxonomy_combined.csv`   | Taxonomy ├ bootstrap columns combined                  |
+| `tax_counts.csv`          | Taxonomy ├ per-sample counts                           |
+| `asv_counts.csv`          | ASV sequences ├ per-sample counts (no taxonomy)        |
 | `pipeline_stats.csv`      | Read counts retained at each pipeline stage            |
 
 ### Configuring vsearch (`vsearch:` in `pipeline.yml`)
@@ -436,8 +449,8 @@ projects/{project_name}/{run}/
 │   │   ├── taxonomy.csv         # Taxonomy assignments
 │   │   ├── taxonomy_bootstraps.csv
 │   │   ├── taxonomy_combined.csv
-│   │   ├── tax_counts.csv       # Taxonomy ├ per-sample counts
-│   │   ├── asv_counts.csv       # Sequences ├ per-sample counts
+│   │   ├── tax_counts.csv       # Taxonomy + per-sample counts
+│   │   ├── asv_counts.csv       # Sequences + per-sample counts
 │   │   └── pipeline_stats.csv
 │   ├── Figures/                 # Quality profile and error rate PDFs
 │   ├── Checkpoints/             # RData checkpoints for stage resumption
@@ -453,7 +466,7 @@ projects/{project_name}/{run}/
 │   ├── taxonomy.tsv             # Top-hit taxonomy assignments (ASV or OTU)
 │   └── logs/
 └── merged/
-    ├── merged.csv               # Merged taxonomy ├ counts (all taxa)
+    ├── merged.csv               # Merged taxonomy + counts (all taxa)
     ├── protist_filter.csv       # Filtered subset (one per merge_taxa.filters entry)
     └── results.duckdb           # DuckDB database for API queries
 ```
@@ -496,31 +509,31 @@ Each pipeline stage returns a typed result (`TrimmedReads`, `ASVResult`, `OTURes
 
 ## Third-party tools
 
-This project orchestrates the following tools. Each is fetched from its upstream source by `install.sh` and is subject to its own license - no third-party binaries are included in this repository.
+This project orchestrates the following tools. Each is fetched from its upstream source by `install.sh` and is subject to its own licence; no third-party binaries are included in this repository.
 
-| Tool                                                                                                 | License | Source                  |
-| ------------------------------------------------------------------------------------------------------| ---------| -------------------------|
-| [cutadapt](https://github.com/marcelm/cutadapt)                                                      | MIT     | PyPI                    |
-| [FastQC](https://github.com/s-andrews/FastQC)                                                        | GPL v3  | Babraham Bioinformatics |
-| [MultiQC](https://github.com/MultiQC/MultiQC)                                                        | GPL v3  | PyPI                    |
-| [DADA2](https://benjjneb.github.io/dada2/) ([optimised fork](https://github.com/JoshuaJewell/dada2)) | LGPL v3 | Bioconductor            |
-| [swarm](https://github.com/frederic-mahe/swarm)                                                      | GPL v3  | GitHub Releases         |
-| [vsearch](https://github.com/torognes/vsearch)                                                       | GPL v3  | GitHub Releases         |
-| [cd-hit](https://github.com/weizhongli/cdhit)                                                        | GPL v2+ | GitHub Releases / apt   |
+| Tool                                            | License | Source                  |
+| -------------------------------------------------| ---------| -------------------------|
+| [cutadapt](https://github.com/marcelm/cutadapt) | MIT     | PyPI                    |
+| [FastQC](https://github.com/s-andrews/FastQC)   | GPL v3  | Babraham Bioinformatics |
+| [MultiQC](https://github.com/MultiQC/MultiQC)   | GPL v3  | PyPI                    |
+| [DADA2](https://benjjneb.github.io/dada2/)      | LGPL v3 | Bioconductor            |
+| [swarm](https://github.com/frederic-mahe/swarm) | GPL v3  | GitHub Releases         |
+| [vsearch](https://github.com/torognes/vsearch)  | GPL v3  | GitHub Releases         |
+| [cd-hit](https://github.com/weizhongli/cdhit)   | GPL v2+ | GitHub Releases / apt   |
 
 ## Acknowledgements
 
 This pipeline draws on the following prior work:
 
-- **Frédéric Mahé** - [Fred's metabarcoding pipeline](https://github.com/frederic-mahe/swarm/wiki/Fred's-metabarcoding-pipeline) informed the overall workflow architecture: the sequencing of primer trimming, `swarm.jl`, vsearch-based taxonomy assignment, and final table merge/filter stages.
-- **Benjamin J. Callahan _et al._** - [DADA2 tutorial](https://benjjneb.github.io/dada2/tutorial.html), used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), which `dada2.jl` and its modules are based on.
+- **Frédéric Mahé**: [Fred's metabarcoding pipeline](https://github.com/frederic-mahe/swarm/wiki/Fred's-metabarcoding-pipeline) informed the overall workflow architecture, namely the sequencing of primer trimming, `swarm.jl`, vsearch-based taxonomy assignment, and the final table merge/filter stages.
+- **Benjamin J. Callahan _et al._**: [DADA2 tutorial](https://benjjneb.github.io/dada2/tutorial.html), used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), on which `dada2.jl` and its modules are based.
 
 The following colleagues at the **Department of Parasitology, Charles University** (Faculty of Science, BIOCEV, Vestec, Czech Republic) contributed to this work:
 
-- **Mgr. Jiří Novák** (supervisor) - scripts from which several modules and configurations were adapted.
-- **doc. Mgr. Vladimír Hampl** - provided laboratory access and resources.
+- **Mgr. Jiří Novák** (supervisor): scripts from which several modules and configurations were adapted.
+- **doc. Mgr. Vladimír Hampl**: provided laboratory access and resources.
 
-## License
+## Licence
 
 Copyright © 2026 Joshua Benjamin Jewell.
 

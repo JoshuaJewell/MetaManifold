@@ -1,0 +1,89 @@
+cff-version: 1.2.0
+message: "If you use MetaManifold in academic work, please cite it as follows."
+title: "MetaManifold: a Julia orchestrator for amplicon sequencing pipelines with an interactive web interface"
+type: software
+authors:
+  - given-names: Joshua Benjamin
+    family-names: Jewell
+    email: jjewell23@rvc.ac.uk
+    affiliation: "Royal Veterinary College"
+    orcid: "https://orcid.org/0009-0007-0289-9741"
+version: "0.1.0"
+date-released: "2026-05-21"
+license: AGPL-3.0-only
+repository-code: "https://github.com/JoshuaJewell/MetaManifold-WebUI"
+url: "https://github.com/JoshuaJewell/MetaManifold-WebUI"
+abstract: >-
+  MetaManifold is a Julia-native orchestrator for amplicon sequencing
+  workflows. It wraps cutadapt, DADA2, SWARM, vsearch, and cd-hit-est into a
+  single configurable pipeline, storing per-run results in DuckDB and exposing
+  them through an interactive React frontend. Analyses include alpha diversity,
+  taxonomic composition, NMDS, and PERMANOVA via R/vegan, together with
+  cross-run comparison and a functional-database annotation layer.
+keywords:
+  - amplicon sequencing
+  - metabarcoding
+  - DADA2
+  - SWARM
+  - bioinformatics
+  - Julia
+  - DuckDB
+references:
+  - type: article
+    title: "DADA2: High-resolution sample inference from Illumina amplicon data"
+    authors:
+      - family-names: Callahan
+        given-names: "Benjamin J."
+      - family-names: McMurdie
+        given-names: "Paul J."
+      - family-names: Rosen
+        given-names: "Michael J."
+      - family-names: Han
+        given-names: "Andrew W."
+      - family-names: Johnson
+        given-names: "Amy Jo A."
+      - family-names: Holmes
+        given-names: "Susan P."
+    journal: "Nature Methods"
+    year: 2016
+    volume: 13
+    issue: 7
+    start: 581
+    end: 583
+    doi: "10.1038/nmeth.3869"
+  - type: article
+    title: "Swarm v2: highly-scalable and high-resolution amplicon clustering"
+    authors:
+      - family-names: Mahe
+        given-names: "Frederic"
+      - family-names: Rognes
+        given-names: "Torbjorn"
+      - family-names: Quince
+        given-names: "Christopher"
+      - family-names: "de Vargas"
+        given-names: "Colomban"
+      - family-names: Dunthorn
+        given-names: "Micah"
+    journal: "PeerJ"
+    year: 2015
+    volume: 3
+    start: e1420
+    doi: "10.7717/peerj.1420"
+  - type: article
+    title: "VSEARCH: a versatile open source tool for metagenomics"
+    authors:
+      - family-names: Rognes
+        given-names: "Torbjorn"
+      - family-names: Flouri
+        given-names: "Tomas"
+      - family-names: Nichols
+        given-names: "Ben"
+      - family-names: Quince
+        given-names: "Christopher"
+      - family-names: Mahe
+        given-names: "Frederic"
+    journal: "PeerJ"
+    year: 2016
+    volume: 4
+    start: e2584
+    doi: "10.7717/peerj.2584"
