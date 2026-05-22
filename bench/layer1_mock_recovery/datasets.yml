@@ -1,0 +1,52 @@
+# Registry of mock-community datasets for Layer 1 of the benchmark.
+#
+# Each entry describes one paired-end mock that the DADA2 pipeline runs against,
+# together with the ground-truth taxonomy at rank L6 (genus). The runner reads
+# this file, drives MetaManifold.DADA2.dada2 per entry, and stores predicted
+# taxa under outputs/<key>/. The evaluator then compares predicted to expected.
+#
+# Suggested sources for populating the URL fields are documented inline. URLs
+# are intentionally left blank rather than guessed; populate them locally from
+# the sources cited below before running fetch.jl.
+#
+# Field reference:
+#   primers          cutadapt primer-pair name; must exist in config/defaults/pipeline.yml
+#                    under the cutadapt.primer_pairs section (e.g. "EMP", "515F-806R").
+#   fastq_forward    URL or local path glob for R1 reads.
+#   fastq_reverse    URL or local path glob for R2 reads.
+#   expected_l6      URL or local path to ground-truth taxonomy, QIIME L6 format
+#                    (tab-separated: taxon string in column 1, per-sample relative
+#                    abundance in subsequent columns, first row a SampleID header).
+#   taxonomy_db      Database key, must exist in config/databases.yml. Use pr2
+#                    for 18S, silva for 16S.
+#   amplicon         16S or 18S; informational, used by the report.
+#   notes            Freeform; cite the dataset's source publication if relevant.
+
+datasets:
+
+  mockrobiota_mock3:
+    primers: EMP
+    amplicon: 16S
+    fastq_forward: ""
+    fastq_reverse: ""
+    expected_l6: ""
+    taxonomy_db: silva
+    notes: "Mockrobiota mock-3 (Bokulich et al. 2016, mSystems). Even-abundance bacterial mock, 16S V4."
+
+  mockrobiota_mock12:
+    primers: EMP
+    amplicon: 16S
+    fastq_forward: ""
+    fastq_reverse: ""
+    expected_l6: ""
+    taxonomy_db: silva
+    notes: "Mockrobiota mock-12. Staggered abundance variant; useful for testing rare-taxon recovery."
+
+  supplemental_even_18S:
+    primers: EMP
+    amplicon: 18S
+    fastq_forward: ""
+    fastq_reverse: ""
+    expected_l6: "/home/joshua/Documents/supplemental_otu_clustering_datasets/expected_taxonomies/even/even_L6.txt"
+    taxonomy_db: pr2
+    notes: "Eukaryotic even mock; expected_taxonomies in the local supplemental directory. Raw FASTQ must be sourced from the corresponding QIIME study (no DADA2 input in the supplemental as committed)."

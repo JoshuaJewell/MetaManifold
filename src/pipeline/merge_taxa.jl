@@ -27,7 +27,7 @@ export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merg
         return join(repr.(dups), ", ")
     end
 
-    # Import vsearch taxonomy
+    ## Import vsearch taxonomy
     function import_vsearch(file::AbstractString)
         rows = Vector{Vector{String}}()
         open(file, "r") do io
@@ -128,20 +128,16 @@ export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merg
         
         @info("Merge taxa: Merging taxonomy counts.")
 
-        # build taxonomy dataframe - FIXED VERSION
+        # Build taxonomy dataframe
         imported = import_vsearch(taxonomy_vsearch_path)
         df_tax_raw = vsearch_to_df(imported)
         header, rows = build_taxonomy_table_rows(df_tax_raw, db_meta)
-        
-        # Create DataFrame properly by specifying all columns first
         df_taxonomy = DataFrame([Symbol(h) => String[] for h in header])
         
-        # Append each row properly
         for r in rows
             push!(df_taxonomy, r)
         end
 
-        # read counts CSV
         df_counts = CSV.read(counts_csv_path, DataFrame)
 
         # Strip DADA2 filtered-read suffixes from sample column names so they
@@ -475,9 +471,9 @@ export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merg
         merge_dir   = joinpath(project.dir, "merged")
         hash_file   = joinpath(merge_dir, "config.hash")
 
-        tax_counts_path = joinpath(dirname(source.taxonomy), "tax_counts.csv")
         tables_dir      = dirname(source.taxonomy)
         tax_prefix      = splitext(basename(source.taxonomy))[1]
+        tax_counts_path = joinpath(tables_dir, "tax_counts.csv")
         boot_path       = joinpath(tables_dir, tax_prefix * "_bootstraps.csv")
         data_mtime     = max(mtime(tax.tsv), mtime(source.taxonomy),
                              isfile(tax_counts_path) ? mtime(tax_counts_path) : 0.0,

@@ -37,6 +37,7 @@ using MetaManifold.FuncDBAnnotation
     include("unit/test_databases.jl")
     include("unit/test_merge_taxa_mappings.jl")
     include("unit/test_funcdb.jl")
+    include("unit/test_routes.jl")
 
     ## Integration tests (opt-in)
     if RUN_INTEGRATION

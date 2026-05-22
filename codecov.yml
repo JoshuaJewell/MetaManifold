@@ -1,0 +1,24 @@
+## Codecov configuration
+# Only the Julia backend under src/ is instrumented (see the
+# julia-processcoverage step in CI); the TypeScript frontend is not measured
+# through this report.
+
+coverage:
+  status:
+    project:
+      default:
+        ## Compare against the parent commit and tolerate a small dip so that
+        ## routine refactors do not fail the build on coverage alone.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        ## Report patch coverage for information without blocking merges.
+        informational: true
+
+## Paths excluded from the coverage denominator
+# MetaManifold.jl is pure module assembly: it contains only include and using
+# statements with no testable branches, so counting it merely depresses the
+# reported percentage without reflecting any real gap in testing.
+ignore:
+  - "src/MetaManifold.jl"

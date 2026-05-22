@@ -2,20 +2,20 @@ module Config
 
 # Hierarchical config cascade and per-section content-hash helpers.
 #
-# Config cascade (global -> study -> run):
+# Config cascade (global -> study -> group(s) -> run):
 #   config/defaults/pipeline.yml     <- full defaults (source of truth)
 #   config/pipeline.yml              <- machine-level overrides
 #   data/{study}/pipeline.yml        <- study-level overrides
 #   ...intermediate dirs...
 #   data/{study}/{run}/pipeline.yml  <- run-level overrides
 #
-# Pipeline configs live alongside the input data so that inputs and their
-# settings are co-located in data/ and outputs remain isolated in projects/.
+# Pipeline configs live alongside the input data so that inputs are together
+# in data/ and outputs remain isolated in projects/.
 #
 # Each override file contains only intentional changes; omitted keys are
 # inherited from the nearest ancestor. At the start of each run, all levels
 # are deep-merged into a single Dict and written to:
-#   projects/{study}/{run}/run_config.yml
+#   projects/{study}/{group}/{run}/run_config.yml
 #
 # Stage skip guards hash the relevant YAML section from run_config.yml so
 # that any change at any level - global, study, or run - correctly
@@ -34,6 +34,8 @@ export _section_stale, _write_section_hash, _stale_keys,
 
     const DEFAULT_SEED = 123
 
+    ## Pipeline stage sections
+    # Maps each stage to the config sections whose change should invalidate it.
     const _STAGE_SECTIONS = Dict(
         :fastqc_multiqc => ["fastqc", "multiqc"],
         :cutadapt => ["seed", "subsample_n", "cutadapt"],
@@ -55,7 +57,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         join(sections, ",")
     end
 
-    # Deep merge
+    ## Deep merge
     # Recursively merge `patch` into `base`. Dict values are merged recursively;
     # all other types (including Arrays) are replaced by the patch value.
     function _deep_merge(base::Dict, patch::Dict)
@@ -67,7 +69,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         return result
     end
 
-    # Cascade path discovery
+    ## Cascade path discovery
     # Return the ordered list of pipeline.yml paths participating in the cascade,
     # from least specific (defaults) to most specific (leaf project dir).
     function _cascade_paths(config_dir::String, study_dir::String, project_dir::String)
@@ -95,7 +97,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         return paths
     end
 
-    # Config loading
+    ## Config loading
     # Merge all config levels in `paths` (ordered global -> specific).
     # paths[1] must exist (the defaults file). Subsequent files are optional;
     # missing files and files that parse as nothing/empty are skipped.
@@ -120,7 +122,7 @@ export _section_stale, _write_section_hash, _stale_keys,
     load_merged_config(project::ProjectCtx) =
         load_merged_config(project.config_dir, project.data_study_dir, project.data_dir)
 
-    # run_config.yml
+    ## run_config.yml
     # Merge all cascade levels and write the result to {project.dir}/run_config.yml.
     # Regenerates only when a source file is newer than the existing run_config.yml.
     # Returns the path to run_config.yml.
@@ -143,7 +145,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         return run_config_path
     end
 
-    # Section content hashes
+    ## Section content hashes
     # Produce a stable, canonical string from a YAML-loaded value.
     # Dicts are sorted by key so insertion-order differences do not affect the hash.
     function _canonical(x)::String
@@ -185,16 +187,12 @@ export _section_stale, _write_section_hash, _stale_keys,
     # Section can be a dotted path ("dada2.filter_trim") or a comma-separated
     # list of dotted paths ("dada2.dada,dada2.merge") whose canonical strings
     # are joined before hashing.
-    function _section_hash(cfg::Dict, section::String)::String
-        combined = join([_canonical(_get_nested(cfg, strip(s)))
-                         for s in split(section, ",")], "|")
-        bytes2hex(sha256(combined))
-    end
-
     function _section_hash(config_path::String, section::String)::String
         cfg = YAML.load_file(config_path)
         cfg isa Dict || return bytes2hex(sha256(""))
-        _section_hash(cfg, section)
+        combined = join([_canonical(_get_nested(cfg, strip(s)))
+                         for s in split(section, ",")], "|")
+        bytes2hex(sha256(combined))
     end
 
     """
@@ -273,7 +271,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         end
     end
 
-    # Extend _write_section_hash to also write companion values file.
+    # Extend _write_section_hash to also write companion values file
     function _write_section_values(config_path::String, section::String, hash_file::String)
         cfg = YAML.load_file(config_path)
         cfg isa Dict || return

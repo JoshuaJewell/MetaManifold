@@ -73,7 +73,20 @@
             @info "Server smoke tests passed on port $port"
         end
     finally
-        kill(proc)
+        ## Interrupt rather than hard-kill: SIGINT lets the server unwind and
+        ## run its at-exit hooks, which is what flushes --code-coverage data to
+        ## disk. A SIGKILL/SIGTERM would terminate before the coverage writer
+        ## runs, so the subprocess's route lines would never be counted.
+        kill(proc, Base.SIGINT)
+        for _ in 1:60
+            process_running(proc) || break
+            sleep(0.25)
+        end
+        process_running(proc) && kill(proc)
+        try
+            wait(proc)
+        catch
+        end
         rm(tmp_root; recursive=true)
     end
 
