@@ -250,8 +250,9 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 
-# pkgdown site
-docs/
+## Documentation kept local except published release notes
+docs/*
+!docs/release-notes/
 
 # translation temp files
 
@@ -308,3 +309,4 @@ archive/
 ### Exceptions
 !.github
 !.github/**
+!.Rprofile

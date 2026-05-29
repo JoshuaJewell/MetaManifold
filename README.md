@@ -3,14 +3,18 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Julia ≥ 1.0](https://img.shields.io/badge/Julia-%E2%89%A51.0-9558B2?logo=julia)](https://julialang.org)
 [![R ≥ 4.0](https://img.shields.io/badge/R-%E2%89%A54.0-276DC3?logo=r)](https://www.r-project.org)
-[![CI](https://github.com/JoshuaJewell/MetaManifold/actions/workflows/ci.yml/badge.svg)](https://github.com/JoshuaJewell/MetaManifold/actions/workflows/ci.yml)
+[![CI](https://github.com/JoshuaJewell/MetaManifold-WebUI/actions/workflows/ci.yml/badge.svg)](https://github.com/JoshuaJewell/MetaManifold-WebUI/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/JoshuaJewell/MetaManifold-WebUI/graph/badge.svg?token=20F1VLF590)](https://codecov.io/gh/JoshuaJewell/MetaManifold-WebUI)
 
-MetaManifold wraps standard amplicon sequencing workflows into a single configurable Julia orchestrator: from raw paired-end Next Generation Sequencing reads through denoising, taxonomy assignment, and taxonomic filtering, with interactive analysis in the browser.
+MetaManifold wraps standard amplicon sequencing workflows into a single configurable Julia orchestrator: from raw paired-end Next Generation Sequencing reads through denoising, taxonomy assignment, taxonomic filtering, and functional annotation, with interactive configuration and analysis in the browser.
+
+<p align="center">
+  <img src=".github/screenshots/hero.png" width="850" alt="MetaManifold web interface showing a study with interactive analysis charts">
+</p>
 
 ## Overview
 
-MetaManifold consists of a Julia backend (pipeline engine + REST API) and a TypeScript/React frontend. The pipeline runs FastQC, MultiQC, cutadapt, DADA2, SWARM, vsearch, and cd-hit under the hood; results are stored in per-run DuckDB databases and served to the frontend as interactive Plotly charts.
+MetaManifold consists of a Julia backend (pipeline engine + REST API) and a TypeScript/React frontend. The pipeline runs FastQC, MultiQC, cutadapt, DADA2, SWARM, vsearch, and cd-hit-est under the hood; results are stored in per-run DuckDB databases and served to the frontend as interactive Plotly charts and filterable tables. Pipeline configuration is editable directly in the web UI at every cascade level (see [Configuration](#configuration)), and a functional-annotation layer supports manual curation.
 
 **Pipeline stages**
 
@@ -46,16 +50,17 @@ Raw FASTQs  (data/{study}/[{group}/]{run}/*.fastq.gz)
 
 **Analysis**
 
-Once a run completes, analysis is performed on request through the web UI:
+Once a run completes, analysis is performed on request through the web UI, both per run and across runs within a study:
 
-- Alpha diversity (richness, Shannon, Simpson) per sample
-- Taxonomic composition bar charts (relative or absolute)
+- Alpha diversity (richness, Shannon, Simpson), per sample or as cross-run comparison boxplots with significance testing
+- Taxonomic composition bar charts at a chosen rank, relative or absolute
+- Organism-composition charts that classify ASVs/OTUs into biological categories (a "Composition" view, e.g. protozoa, helminths, fungi, host)
+- Taxon overlap across runs as proportional Euler or UpSet plots
 - Pipeline stage read-count summaries
-- Cross-run alpha diversity comparison (boxplots)
 - NMDS ordination (Bray-Curtis, via R/vegan)
 - PERMANOVA (via R/vegan)
 
-All analysis charts are returned as Plotly JSON and rendered interactively in the browser.
+Counts may be normalised before analysis (none, rarefaction to a fixed or auto-resolved depth, or relative sum scaling), and contamination-flagged taxa may be included or excluded. All analysis charts are returned as Plotly JSON and rendered interactively in the browser.
 
 ## Prerequisites
 
@@ -68,8 +73,8 @@ All analysis charts are returned as Plotly JSON and rendered interactively in th
 ## Installation
 
 ```bash
-git clone https://github.com/JoshuaJewell/MetaManifold.git
-cd MetaManifold
+git clone https://github.com/JoshuaJewell/MetaManifold-WebUI.git
+cd MetaManifold-WebUI
 bash install.sh
 ```
 
@@ -130,6 +135,64 @@ Or run the Julia server directly:
 ```bash
 julia --project=. src/server/server.jl
 ```
+
+## Web interface
+
+The browser interface is the primary way to drive MetaManifold. Beyond creating studies and launching runs, it offers the following:
+
+### Editing configuration
+
+Every pipeline setting can be edited in the UI without touching a YAML file. Configuration is presented as collapsible accordion sections (study design, primer trimming, DADA2 denoising and taxonomy, OTU clustering, annotation, analysis) and can be set at any level of the cascade: the instance-wide defaults, a study, a group, or an individual run. Edits at a finer level override coarser ones (see [Configuration](#configuration) for the cascade rules). When a setting changes, the affected pipeline stages are flagged as stale, so it is clear which outputs a re-run would regenerate; a tooltip lists exactly which keys changed and at which level.
+
+### Pipeline runs and outputs
+
+A run's page is the working surface for that run. It is where the run-level configuration above is edited, where the full pipeline or any individual stage (including the DADA2 substages) is launched, and where each stage's status is shown. Long-running jobs report progress live through a server-sent event stream, and the jobs panel lets you watch or cancel them. As stages complete, their outputs become available through the views that follow: quality reports, the results table, functional annotation, and composition.
+
+<p align="center">
+  <img src=".github/screenshots/run-view.png" width="800" alt="A run page showing per-stage status, launch controls, and run-level configuration">
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/pipeline-progress.png" width="800" alt="Live pipeline progress: the jobs panel and the server-sent event stream">
+</p>
+
+### QC
+
+Raw-read QC (FastQC aggregated by MultiQC) and the DADA2 quality, denoising, merging, and taxonomy diagnostics are embedded in the UI, each with the relevant per-stage configuration alongside and a re-run control.
+
+<p align="center">
+  <img src=".github/screenshots/qc.png" width="800" alt="QC view embedding the MultiQC report and DADA2 quality diagnostics">
+</p>
+
+### Results explorer
+
+Each run's merged taxonomy-and-count table, and any derived tables, can be browsed interactively. The table supports per-column filtering (text search, numeric range, include/exclude lists) and a global text filter, column sorting, configurable pagination, and column visibility toggles including taxonomy-source presets (VSEARCH-only, DADA2-only, or all) and a switch for the per-sample count columns. Sequences carry BLAST links, and OTU rows can be expanded to their constituent sequences. Frequently used filters can be saved as named presets and reapplied; filtered tables can be saved back into the run or exported to Excel (`.xlsx`).
+
+<p align="center">
+  <img src=".github/screenshots/results-explorer.png" width="800" alt="Results explorer table with per-column filters and taxonomy-source column presets">
+</p>
+
+### Annotation
+
+The annotation view applies a functional database (`funcdb`) to a run's merged table, independently for the VSEARCH and DADA2 taxonomies. For each sequence it attaches functional metadata (function, associated organism and material, environment, pathogen status, and free-text notes) down to a configurable maximum rank. It also derives a 'consensus rank' (the finest rank at which the two classifiers agree) and a composite confidence score combining DADA2's bootstrap support at this rank and VSEARCH's percent identity (mostly for the sake of curiosity).
+
+Curation is supported directly in the view:
+
+- **Contamination tagging:** mark a taxon as contamination (yes / no / unassigned); the flag applies to all rows sharing that rank and taxon, with a live summary of affected reads.
+- **Manual BLAST assignment:** override the assignment for an individual sequence inline.
+- **FuncDB ledger:** add a new functional entry for a taxon, prefilled from the selected row. Entries are written to an append-only ledger and become available to subsequent annotation runs. User edits (contamination flags, manual assignments) are preserved when annotations are regenerated.
+
+<p align="center">
+  <img src=".github/screenshots/annotation.png" width="800" alt="Annotation view showing consensus rank, confidence score, and contamination tagging controls">
+</p>
+
+### Composition
+
+The composition view classifies each ASV/OTU into a biological category and renders per-sample or pooled stacked bar charts. Category sets are defined in `config/compositions/` (the bundled `default.yml` covers protozoa, helminths, fungi, host, plants, and invertebrates); each category references a filter preset from `config/filters/`. A category summary precedes the chart, and a quality filter can cap the number of unresolved taxonomic placeholders admitted.
+
+<p align="center">
+  <img src=".github/screenshots/composition.png" width="800" alt="Composition view with a stacked organism-category bar chart and category summary">
+</p>
 
 ## Configuration
 
@@ -340,18 +403,30 @@ Each entry is a filename relative to `config/filters/`. Remove all entries (or s
 
 ### Configuring analysis (`analysis:` in `pipeline.yml`)
 
-Controls the analysis charts served by the API endpoints (alpha diversity, taxa bar, NMDS, etc.).
+Controls the defaults applied to the analysis charts (alpha diversity, taxa bar, NMDS, etc.). Per-chart choices such as the taxonomic rank, and relative/absolute abundance are selected interactively in the UI and are not config keys.
 
 ```yaml
 analysis:
-  taxa_bar:
-    top_n: 15                  # collapse taxa below this rank to "Other"
-    rank: ~                    # null = lowest assigned rank; or specify e.g. "Class"
+  include_contamination: false   # include taxa flagged as contamination in analyses
+  normalisation: none            # none | rarefaction | rss (relative sum scaling)
+  normalisation_depth: 0         # rarefaction depth; 0 = auto (min positive library size)
   alpha:
-    metrics: ["richness", "shannon", "simpson"]
+    show_points: true            # overlay individual sample points on boxplots
+    annotate_significance: false # annotate pairwise significance on grouped alpha
+    pairwise_brackets: false     # draw significance brackets between groups
+    paired_samples: false        # treat samples as paired in the significance test
+    significance_test: "kruskal_wallis"  # test used for group comparison
   nmds:
-    distance: "bray_curtis"
-    max_stress: 0.2            # warn if NMDS stress exceeds this value
+    max_stress: 0.2              # warn if NMDS stress exceeds this value
+```
+
+### Configuring annotation (`annotation:` in `pipeline.yml`)
+
+Controls the functional-annotation layer applied in the Annotation view.
+
+```yaml
+annotation:
+  max_rank: "species"   # finest rank to which functional metadata is attached
 ```
 
 ### Configuring taxonomic filtering (`config/filters/`)
@@ -475,18 +550,25 @@ projects/{project_name}/{run}/
 
 The server exposes a REST API under `/api/v1/`. Key endpoint groups:
 
-| Group     | Endpoints                                          | Description                                            |
-| -----------| ----------------------------------------------------| --------------------------------------------------------|
-| Studies   | `GET/POST/DELETE /studies`                         | List, create, rename, delete studies                   |
-| Groups    | `POST/DELETE /studies/{study}/groups`              | Create, rename, delete groups                          |
-| Runs      | `GET/POST/DELETE /studies/{study}/runs`            | List, create, rename, delete runs                      |
-| Config    | `GET/PATCH/DELETE /studies/{study}/config`         | Read and edit pipeline config at any cascade level     |
-| Pipeline  | `POST /studies/{study}/pipeline`                   | Launch pipeline jobs (full study or individual stages) |
-| Jobs      | `GET/DELETE /jobs`                                 | Monitor and cancel running pipeline jobs               |
-| Results   | `GET/POST /studies/{study}/runs/{run}/results/...` | Query DuckDB tables, apply filter presets, export      |
-| Analysis  | `POST /studies/{study}/runs/{run}/analysis/...`    | On-demand alpha, taxa-bar, pipeline-stats charts       |
-| Cross-run | `POST /studies/{study}/analysis/...`               | Alpha comparison, NMDS, PERMANOVA across runs          |
-| Databases | `GET/POST /databases`                              | List and download taxonomy databases                   |
+| Group          | Endpoints                                                                                                     | Description                                                                              |
+| ----------------| ---------------------------------------------------------------------------------------------------------------| ------------------------------------------------------------------------------------------|
+| Studies        | `GET/POST/DELETE /studies`, `POST .../rename`                                                                 | List, create, rename, delete studies                                                     |
+| Groups         | `POST/DELETE /studies/{study}/groups`, `POST .../rename`                                                      | Create, rename, delete groups                                                            |
+| Runs           | `GET/POST/DELETE /studies/{study}/runs`, `POST .../rename`                                                    | List, create, rename, delete runs                                                        |
+| Config         | `GET/PATCH/DELETE .../config`, `GET .../config/overrides`                                                     | Read and edit config at any cascade level; list downstream overrides                     |
+| Primers        | `GET /primers`                                                                                                | List configured primer pairs                                                             |
+| Pipeline       | `POST .../pipeline`, `POST .../stages/{stage}`                                                                | Launch full-study, single-run, or individual-stage jobs                                  |
+| Jobs           | `GET/DELETE /jobs`, `GET /jobs/{id}/logs`                                                                     | Monitor and cancel running pipeline jobs                                                 |
+| Events         | `GET /events`                                                                                                 | Server-sent event stream of real-time job and stage updates                              |
+| Results        | `GET/POST/DELETE .../results/tables/...`                                                                      | List, query, filter, save, export (`.xlsx`), and delete tables; OTU member drill-down    |
+| QC             | `GET .../results/qc`, `GET .../results/dada2`                                                                 | MultiQC report metadata and DADA2 figures, logs, stats                                   |
+| Analysis       | `POST .../analysis/{alpha,taxa-bar,venn}`, `GET .../analysis/{pipeline-stats,ranks}`                          | Per-run charts and rank discovery                                                        |
+| Cross-run      | `POST /studies/{study}/analysis/{alpha,taxa-bar,nmds,permanova,venn}`                                         | Comparison, NMDS, PERMANOVA, taxon overlap across runs                                   |
+| Composition    | `GET /category-sets`, `POST .../composition/{source}/{build,query,distinct,analysis}`                         | Category-set listing and organism-composition tables and charts                          |
+| Annotation     | `GET/POST .../annotations/{source}/...`, `POST /funcdb/entries`, `PATCH .../{contamination,blast-assignment}` | Generate and query annotations, curate contamination and assignments, add FuncDB entries |
+| Filter presets | `GET/POST/DELETE /filter-presets`                                                                             | Save, list, delete reusable table filters                                                |
+| Databases      | `GET /databases`, `POST /databases/{key}/download`                                                            | List and download taxonomy databases                                                     |
+| System         | `POST /init`, `GET /capabilities`                                                                             | Initialise project directories; report server capabilities (e.g. R availability)         |
 
 All responses are JSON. Analysis endpoints return Plotly chart specifications.
 
@@ -496,7 +578,8 @@ All responses are JSON. Analysis endpoints return Plotly chart specifications.
 frontend/           TypeScript + React + Vite (SPA)
 src/
   core/             Types, config cascade, validation, DuckDB store, logging
-  pipeline/         Pipeline stages (cutadapt, dada2, swarm, vsearch, cd-hit, merge_taxa)
+  pipeline/         Pipeline stages (cutadapt, dada2, swarm, vsearch, cd-hit-est, merge_taxa)
+  annotation/       Functional database (funcdb): dual-classifier consensus and curation
   analysis/         Diversity metrics + Plotly chart builders
   server/           Oxygen.jl HTTP server
     routes/         REST API route handlers
@@ -532,6 +615,7 @@ The following colleagues at the **Department of Parasitology, Charles University
 
 - **Mgr. Jiří Novák** (supervisor): scripts from which several modules and configurations were adapted.
 - **doc. Mgr. Vladimír Hampl**: provided laboratory access and resources.
+- **Mgr. Paulína Pristašová**: <3.
 
 ## Licence
 
