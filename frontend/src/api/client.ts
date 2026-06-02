@@ -260,11 +260,12 @@ export const api = {
   composition: {
     categorySets: () => get<CategorySet[]>('/api/v1/category-sets'),
     build: (study: string, run: string, source: AnnotationSource, table: string,
-            categorySet: string, opts?: { maxX?: number },
+            categorySet: string, opts?: { maxX?: number; subgroups?: string[] },
             group?: string | null) =>
       post<CompositionBuildResult>(
         `/api/v1/studies/${study}/runs/${run}/composition/${source}/build${gq(group)}`,
-        { table, category_set: categorySet, max_x: opts?.maxX ?? -1 }),
+        { table, category_set: categorySet, max_x: opts?.maxX ?? -1,
+          subgroups: opts?.subgroups ?? [] }),
     query: (study: string, run: string, source: AnnotationSource, q: TableQuery,
             group?: string | null) =>
       post<TablePage>(

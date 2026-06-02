@@ -37,6 +37,21 @@ export function CompositionPanel({
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   // Quality filter: max unresolved _X count. -1 = disabled.
   const [maxX, setMaxX] = useState(-1)
+  // Sub-group scope. Empty means: include every sample column in the run.
+  const [selectedBuildSubgroups, setSelectedBuildSubgroups] = useState<string[]>([])
+  const toggleBuildSubgroup = useCallback((sg: string) => {
+    setSelectedBuildSubgroups(prev =>
+      prev.includes(sg) ? prev.filter(x => x !== sg) : [...prev, sg]
+    )
+  }, [])
+  // Snapshot of the sub-group selection at the moment the composed table was
+  // last built. The chart and pooling derive from this rather than the live
+  // checkbox state, so editing the checkboxes without rebuilding does not
+  // produce dropdown options that no longer exist as columns.
+  const [builtSubgroups, setBuiltSubgroups] = useState<string[]>([])
+  const effectiveSubgroups = builtSubgroups.length > 0
+    ? builtSubgroups
+    : (subgroups ?? [])
 
   //## Analysis
   const [compositionFig, setCompositionFig] = useState<unknown>(null)
@@ -85,16 +100,18 @@ export function CompositionPanel({
     try {
       const result = await api.composition.build(
         study, run, source, selectedTable, selectedCatSet,
-        { maxX }, group,
+        { maxX, subgroups: selectedBuildSubgroups }, group,
       )
       setBuildResult(result)
+      setBuiltSubgroups(selectedBuildSubgroups)
       setBuildStatus('ready')
     } catch (err) {
       setBuildStatus('error')
       setErrorMsg(errorMessage(err))
       toast.error('Failed to build composition table')
     }
-  }, [study, run, source, selectedTable, selectedCatSet, maxX, group, toast])
+  }, [study, run, source, selectedTable, selectedCatSet, maxX,
+      selectedBuildSubgroups, group, toast])
 
   // Paginated query fetcher
   const fetcher = useCallback(
@@ -116,7 +133,7 @@ export function CompositionPanel({
     setAnalysisLoading(true)
     try {
       const poolGroups = poolComposition
-        ? (selectedSubgroup ? [selectedSubgroup] : (subgroups ?? []))
+        ? (selectedSubgroup ? [selectedSubgroup] : effectiveSubgroups)
         : undefined
       const fig = await api.composition.analysis(
         study, run, source, selectedCatSet,
@@ -129,7 +146,17 @@ export function CompositionPanel({
     } finally {
       setAnalysisLoading(false)
     }
-  }, [study, run, source, selectedCatSet, selectedSubgroup, subgroups, poolComposition, group, toast])
+  }, [study, run, source, selectedCatSet, selectedSubgroup, effectiveSubgroups, poolComposition, group, toast])
+
+  // If a chart-time sub-group selection is no longer present in the composed
+  // table after a rebuild, clear it back to "All sub-groups" so the chart does
+  // not silently render against a missing column set.
+  useEffect(() => {
+    if (selectedSubgroup && builtSubgroups.length > 0
+        && !builtSubgroups.includes(selectedSubgroup)) {
+      setSelectedSubgroup(null)
+    }
+  }, [builtSubgroups, selectedSubgroup])
 
   return (
     <div className="card">
@@ -203,6 +230,31 @@ export function CompositionPanel({
         )}
       </div>
 
+      {/* Build-time sub-group scope: empty = include every sample column */}
+      {subgroups && subgroups.length >= 2 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10,
+                       fontSize: '.82rem', marginBottom: 12, flexWrap: 'wrap' }}
+             title="Restrict the composed table to sample columns belonging to the
+                    selected sub-groups; rows with zero reads across those columns
+                    are dropped. Leaving all unchecked includes every sub-group.">
+          <span style={{ fontWeight: 600 }}>Sub-groups:</span>
+          {subgroups.map(sg => (
+            <label key={sg} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input
+                type="checkbox"
+                checked={selectedBuildSubgroups.includes(sg)}
+                onChange={() => toggleBuildSubgroup(sg)}
+                disabled={buildStatus === 'building'}
+              />
+              {sg}
+            </label>
+          ))}
+          {selectedBuildSubgroups.length === 0 && (
+            <span style={{ color: 'var(--color-muted-fg)' }}>(all)</span>
+          )}
+        </div>
+      )}
+
       {/* Error display */}
       {buildStatus === 'error' && errorMsg && (
         <div style={{
@@ -261,7 +313,7 @@ export function CompositionPanel({
           {/* Analysis */}
           <div style={{ marginTop: 24 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              {subgroups && subgroups.length >= 2 && (
+              {effectiveSubgroups.length >= 2 && (
                 <select
                   value={selectedSubgroup ?? ''}
                   onChange={e => setSelectedSubgroup(e.target.value || null)}
@@ -269,7 +321,7 @@ export function CompositionPanel({
                            fontSize: '.82rem', background: 'var(--color-bg)' }}
                 >
                   <option value="">All sub-groups</option>
-                  {subgroups.map(sg => <option key={sg} value={sg}>{sg}</option>)}
+                  {effectiveSubgroups.map(sg => <option key={sg} value={sg}>{sg}</option>)}
                 </select>
               )}
               <label style={{ fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: 4 }}>

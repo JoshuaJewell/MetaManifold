@@ -84,6 +84,19 @@ function _build_quality_where(source::String, merged_cols_set::Set{String};
     isempty(clauses) ? "" : "WHERE " * join(clauses, " AND ")
 end
 
+# Conjoin one or more WHERE fragments (either `""` or `"WHERE ..."`) into a single
+# clause, parenthesising each body so AND/OR precedence is preserved.
+function _combine_where_clauses(parts::String...)
+    bodies = String[]
+    for p in parts
+        s = strip(p)
+        isempty(s) && continue
+        body = startswith(s, "WHERE ") || startswith(s, "where ") ? s[7:end] : s
+        push!(bodies, "(" * strip(body) * ")")
+    end
+    isempty(bodies) ? "" : "WHERE " * join(bodies, " AND ")
+end
+
 ## Helpers
 function _compositions_dir()
     joinpath(dirname(ServerState.projects_dir()), "config", "compositions")
@@ -299,7 +312,8 @@ const _ANNOTATION_CARRY_COLS = [
 function _build_composition!(study::String, run::String, source::String,
                              merged_table::String, category_set_name::String;
                              group::Union{String,Nothing}=nothing,
-                             max_x::Int=-1)
+                             max_x::Int=-1,
+                             subgroups::Vector{String}=String[])
     merge_dir = _require_duckdb(study, run; group)
     isnothing(merge_dir) && return json_error(404, "no_results",
         "No results database for run '$run' - run the pipeline first")
@@ -317,6 +331,24 @@ function _build_composition!(study::String, run::String, source::String,
     isempty(merged_cols) && return json_error(404, "table_not_found",
         "Table '$merged_table' not found in results database")
     merged_col_set = Set(merged_cols)
+
+    # Resolve sample column subset when the build is scoped to specific sub-groups.
+    # Columns outside the chosen sub-groups are added to drop_cols below so they
+    # never reach the composed table, and the row filter at step 5 drops ASVs
+    # whose summed reads across the kept columns are zero.
+    selected_sample_cols = String[]
+    if !isempty(subgroups)
+        all_sample_cols = with_results_db(merge_dir) do con
+            Analysis.sample_columns(con, merged_table)
+        end
+        all_sample_cols isa HTTP.Response && return all_sample_cols
+        selected_sample_cols = _filter_by_prefix(all_sample_cols, subgroups)
+        isempty(selected_sample_cols) && return json_error(400, "no_subgroup_samples",
+            "Sub-group selection $(subgroups) matches no sample columns in '$merged_table'")
+        excluded_sample_cols = setdiff(all_sample_cols, selected_sample_cols)
+    else
+        excluded_sample_cols = String[]
+    end
 
     # 2. Check if annotation DB exists; discover available annotation tables
     ann_db_path = abspath(_annotation_db_path(study, run, source; group))
@@ -355,8 +387,10 @@ function _build_composition!(study::String, run::String, source::String,
     ann_col_set = Set(ann_cols)
     has_ann_table = !isempty(ann_cols)
 
-    # 3. Strip columns from the other taxonomy source
+    # 3. Strip columns from the other taxonomy source, plus sample columns
+    # outside the chosen sub-groups (if any).
     drop_cols = Set(_source_drop_cols(source, merged_cols))
+    union!(drop_cols, excluded_sample_cols)
     keep_cols = filter(c -> !(c in drop_cols), merged_cols)
     merged_select = join(["m.\"$c\"" for c in keep_cols], ", ")
 
@@ -365,6 +399,15 @@ function _build_composition!(study::String, run::String, source::String,
 
     # 5. Build quality filter WHERE clause (always omit NA, optional max X)
     quality_where = _build_quality_where(source, merged_col_set; omit_na=false, max_x)
+
+    # 5b. When scoped to sub-groups, also require at least one read across the
+    # retained sample columns; otherwise zero-read ASVs would clutter the table.
+    subgroup_where = isempty(selected_sample_cols) ? "" : let
+        sum_expr = join(["COALESCE(m.\"$c\", 0)" for c in selected_sample_cols], " + ")
+        "WHERE ($sum_expr) > 0"
+    end
+
+    composed_where = _combine_where_clauses(quality_where, subgroup_where)
 
     # 6. Build the carry columns (only those that actually exist in annotation)
     carry_cols = filter(c -> c in ann_col_set, _ANNOTATION_CARRY_COLS)
@@ -402,7 +445,7 @@ function _build_composition!(study::String, run::String, source::String,
                        $case_when AS "Category"
                 FROM results_db."$merged_table" m
                 LEFT JOIN ann_db."$ann_table" ann ON m."SeqName" = ann."SeqName"
-                $quality_where
+                $composed_where
             """
         else
             sql = """
@@ -410,7 +453,7 @@ function _build_composition!(study::String, run::String, source::String,
                 SELECT $merged_select,
                        $case_when AS "Category"
                 FROM results_db."$merged_table" m
-                $quality_where
+                $composed_where
             """
         end
 
@@ -551,12 +594,15 @@ end
     table = string(get(body, :table, "merged"))
     category_set = string(get(body, :category_set, "default"))
     max_x = Int(get(body, :max_x, -1))
+    subgroups = let v = get(body, :subgroups, nothing)
+        isnothing(v) ? String[] : String[string(g) for g in v]
+    end
 
     try
         _build_composition!(study, run, source, table, category_set;
-                            group=_req_group(req), max_x)
+                            group=_req_group(req), max_x, subgroups)
     catch e
-        @error "Composition build failed" study run source table category_set exception=(e, catch_backtrace())
+        @error "Composition build failed" study run source table category_set subgroups exception=(e, catch_backtrace())
         json_error(500, "composition_build_failed",
             "Failed to build composition table: $(sprint(showerror, e))")
     end

@@ -205,6 +205,14 @@ function _filter_by_prefix(scols::Vector{String}, prefix::Union{String,Nothing})
     filter(c -> startswith(c, pfx), scols)
 end
 
+# Keep columns matching any of several sub-group prefixes, preserving input order.
+# An empty prefix list means no restriction, mirroring the `nothing` case above.
+function _filter_by_prefix(scols::Vector{String}, prefixes::Vector{String})
+    isempty(prefixes) && return scols
+    pfxs = [p * "_" for p in prefixes]
+    filter(c -> any(p -> startswith(c, p), pfxs), scols)
+end
+
 function _resolved_group_label(resolved)
     if !isnothing(resolved.prefix)
         resolved.prefix

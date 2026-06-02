@@ -8,12 +8,15 @@ function _duckdb_columns(con, table::String)
     String[string(row.column_name) for row in eachrow(df)]
 end
 
-# Returns integer columns that represent sample read counts (excludes *_boot bootstrap columns).
+# Returns integer columns that represent sample read counts. Excludes bootstrap
+# columns (`*_boot`) and the grand- and per-subgroup totals (`total`, `total_*`)
+# written by `Annotation._add_totals!`; without these exclusions, summing every
+# integer column on an annotated table double-counts every read.
 function _sample_count_columns(con, table::String)
     result = DBInterface.execute(con,
         "SELECT column_name FROM information_schema.columns WHERE table_name = ? AND data_type LIKE '%INT%'",
         [table])
-    filter(c -> !endswith(c, "_boot"),
+    filter(c -> !endswith(c, "_boot") && c != "total" && !startswith(c, "total_"),
            String[string(r.column_name) for r in eachrow(DataFrame(result))])
 end
 
