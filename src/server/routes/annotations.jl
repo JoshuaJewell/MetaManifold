@@ -408,55 +408,55 @@ function _sync_annotation_csv!(csv_path::String, taxon_col::String, rank::String
     CSV.write(csv_path, csv_df)
 end
 
-## Annotation status
-@get "/api/v1/studies/{study}/runs/{run}/annotations/{source}" function(req,
-                                                                        study::String,
-                                                                        run::String,
-                                                                        source::String)
-    err = _require_study_run_source(study, run, source)
-    !isnothing(err) && return err
-    result = _annotation_catalog(study, run, source; group=_req_group(req))
-    result isa HTTP.Response && return result
-    json(result)
-end
+## QUARANTINED: FuncDB annotation deactivated; code retained, see 2026-06-25 convergence work
+# @get "/api/v1/studies/{study}/runs/{run}/annotations/{source}" function(req,
+#                                                                         study::String,
+#                                                                         run::String,
+#                                                                         source::String)
+#     err = _require_study_run_source(study, run, source)
+#     !isnothing(err) && return err
+#     result = _annotation_catalog(study, run, source; group=_req_group(req))
+#     result isa HTTP.Response && return result
+#     json(result)
+# end
 
-## Annotation generation
-@post "/api/v1/studies/{study}/runs/{run}/annotations/{source}/generate" function(req,
-                                                                                   study::String,
-                                                                                   run::String,
-                                                                                   source::String)
-    err = _require_study_run_source(study, run, source)
-    !isnothing(err) && return err
-    isfile(FUNCDB_PATH) || return json_error(400, "funcdb_missing",
-        "FuncDB database not found at expected path")
+## QUARANTINED: FuncDB annotation deactivated; code retained, see 2026-06-25 convergence work
+# @post "/api/v1/studies/{study}/runs/{run}/annotations/{source}/generate" function(req,
+#                                                                                    study::String,
+#                                                                                    run::String,
+#                                                                                    source::String)
+#     err = _require_study_run_source(study, run, source)
+#     !isnothing(err) && return err
+#     isfile(FUNCDB_PATH) || return json_error(400, "funcdb_missing",
+#         "FuncDB database not found at expected path")
+#
+#     group = _req_group(req)
+#     dir = _require_duckdb(study, run; group)
+#     isnothing(dir) && return json_error(404, "no_results",
+#         "No results database for run '$run' - run the pipeline first")
+#
+#     body = JSON3.read(String(req.body))
+#     table = get(body, :table, nothing)
+#     isnothing(table) && return json_error(400, "missing_table", "Body must include 'table'")
+#     table = string(table)
+#
+#     _generate_annotation!(study, run, source, table; group)
+# end
 
-    group = _req_group(req)
-    dir = _require_duckdb(study, run; group)
-    isnothing(dir) && return json_error(404, "no_results",
-        "No results database for run '$run' - run the pipeline first")
-
-    body = JSON3.read(String(req.body))
-    table = get(body, :table, nothing)
-    isnothing(table) && return json_error(400, "missing_table", "Body must include 'table'")
-    table = string(table)
-
-    _generate_annotation!(study, run, source, table; group)
-end
-
-## Annotation table query
-@post "/api/v1/studies/{study}/runs/{run}/annotations/{source}/{table}/query" function(req,
-                                                                                        study::String,
-                                                                                        run::String,
-                                                                                        source::String,
-                                                                                        table::String)
-    err = _require_study_run_source(study, run, source)
-    !isnothing(err) && return err
-
-    body = JSON3.read(String(req.body))
-    _with_annotation_db(study, run, source; group=_req_group(req)) do con
-        _annotation_query(con, table, body)
-    end
-end
+## QUARANTINED: FuncDB annotation deactivated; code retained, see 2026-06-25 convergence work
+# @post "/api/v1/studies/{study}/runs/{run}/annotations/{source}/{table}/query" function(req,
+#                                                                                         study::String,
+#                                                                                         run::String,
+#                                                                                         source::String,
+#                                                                                         table::String)
+#     err = _require_study_run_source(study, run, source)
+#     !isnothing(err) && return err
+#
+#     body = JSON3.read(String(req.body))
+#     _with_annotation_db(study, run, source; group=_req_group(req)) do con
+#         _annotation_query(con, table, body)
+#     end
+# end
 
 ## Annotation distinct values
 @post "/api/v1/studies/{study}/runs/{run}/annotations/{source}/{table}/distinct/{column}" function(req,

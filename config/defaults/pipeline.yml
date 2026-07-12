@@ -1,99 +1,206 @@
+## MetaManifold factory defaults
+## Every pipeline option carries a default here; a study, group, or run
+## pipeline.yml overrides only the keys it names, cascading over these.
+## Values are deliberately generic; tune read-length and locus-specific numbers
+## (truncation lengths, primers, expected errors) per dataset in a project file.
+
+## Identity and reproducibility
+# Name stamped onto manual annotations and exports; set yours in the global
+# config/pipeline.yml rather than here.
 your_name: ""
-annotation:
-  max_rank: "species"
+# Master random seed for every stochastic step (subsampling, DADA2, rarefaction)
+# so a run reproduces exactly.
 seed: 123
+# Subsample this many reads per sample before processing; 0 uses all reads.
 subsample_n: 0
+# Pool a run's child sub-directories as one denoising batch when true.
 pool_children: false
+
+## Primer trimming (cutadapt)
+cutadapt:
+  # Filename markers that distinguish the forward and reverse read files.
+  r1_suffix: "_R1"
+  r2_suffix: "_R2"
+  # Maximum error rate cutadapt tolerates when matching a primer; ~ uses the
+  # cutadapt default (0.1).
+  error_rate: ~
+  # Named primer pairs to trim, resolved against config/primers.
+  primer_pairs:
+    - "EMP"
+  # Drop read pairs in which no primer was found.
+  discard_untrimmed: true
+  # Worker processes; 0 lets cutadapt choose.
+  cores: 0
+  # Discard reads shorter than this after trimming.
+  min_length: 200
+  # Extra raw cutadapt flags appended verbatim (shell-metacharacter checked).
+  optional_args: ""
+  # Minimum primer/read overlap to call a match; ~ uses the cutadapt default.
+  overlap: ~
+  # Quality-trim read ends below this Phred score; ~ disables it.
+  quality_cutoff: ~
+
+## Denoising and taxonomy (DADA2)
 dada2:
-  merge:
-    max_mismatch: 0
-    min_overlap: 20
-    trim_overhang: true
-  asv:
-    denovo_method: "consensus"
-    band_size_max: 430
-    band_size_min: 200
-  output:
-    taxa_prefix: "taxonomy"
-    fasta_prefix: "asvs"
-    seq_table_prefix: "seqtab_nochim"
+  # Emit progress logging from the R worker.
   verbose: true
+  file_patterns:
+    # Read layout: paired, forward, or reverse.
+    mode: "paired"
   filter_trim:
+    # Discard reads shorter than this after truncation.
     min_len: 175
+    # Require matched forward/reverse read IDs.
     match_ids: true
+    # Remove PhiX spike-in reads.
     rm_phix: true
+    # Trim read ends once quality falls to this Phred score.
     trunc_q: 2
+    # Truncate forward/reverse reads to these lengths; tune per amplicon.
     trunc_len:
       - 220
       - 220
+    # Expected-error ceiling per forward/reverse read.
     max_ee:
       - 3
       - 3
-  file_patterns:
-    mode: "paired"
+  dada:
+    # Self-consistency iterations for error learning.
+    max_consist: 15
+    # Sample pooling for denoising: none, pseudo, or true.
+    pool_method: "pseudo"
+    # Bases sampled when learning the error model.
+    nbases: 200000000
+  merge:
+    # Mismatches tolerated in the forward/reverse overlap.
+    max_mismatch: 0
+    # Minimum overlap to merge a pair.
+    min_overlap: 20
+    # Trim bases that read past the opposite primer.
+    trim_overhang: true
+  asv:
+    # De-novo error method: consensus or pooled.
+    denovo_method: "consensus"
+    # Banded-alignment band widths (max, min).
+    band_size_max: 430
+    band_size_min: 200
+  output:
+    # Output filename stems for the three DADA2 artefacts.
+    taxa_prefix: "taxonomy"
+    fasta_prefix: "asvs"
+    seq_table_prefix: "seqtab_nochim"
   taxonomy:
+    # Assign taxonomy on a remote host over SSH; host ~ runs it locally.
     remote:
       host: ~
       rscript: "Rscript"
       staging_dir: "/absolute/path/on/server"
       identity_file: ~
+    # Minimum bootstrap confidence to keep an assignment; 0 keeps all.
     min_boot: 0
+    # Run the taxonomy assignment stage.
     enabled: true
+    # Threads for assignTaxonomy.
     multithread: 4
+    # Reference database key, resolved against config/databases.
     database: "pr2"
-  dada:
-    max_consist: 15
-    pool_method: "pseudo"
-    nbases: 200000000
-merge_taxa: ~
-fastqc:
-  threads: 20
-  optional_args: ""
-analysis:
-  include_contamination: false
-  normalisation: none
-  normalisation_depth: 0
-  alpha:
-    annotate_significance: false
-    pairwise_brackets: false
-    paired_samples: false
-    show_points: true
-    significance_test: "kruskal_wallis"
-  nmds:
-    max_stress: 0.2
-cutadapt:
-  r1_suffix: "_R1"
-  r2_suffix: "_R2"
-  error_rate: ~
-  primer_pairs:
-    - "EMP"
-  discard_untrimmed: true
-  cores: 0
-  min_length: 200
-  optional_args: ""
-  overlap: ~
-  quality_cutoff: ~
+
+## OTU clustering (SWARM)
+# NB: chimera_check, fastq_minovlen, min_abundance and identity are not read by
+# this pipeline; they are pinned in the local global config/pipeline.yml purely
+# to preserve existing runs' stage hashes, and are omitted here on purpose.
 swarm:
-  threads: 0
-  chimera_check: true
+  # Run the SWARM OTU path.
+  enabled: true
+  # Local clustering resolution (SWARM -d).
   differences: 1
-  fastq_minovlen: 20
-  enabled: true
-  min_abundance: 2
-  identity: 0.97
-  optional_args: ""
-vsearch:
-  query_cov: 0.8
-  maxrejects: ~
-  maxaccepts: ~
-  enabled: true
-  identity: 0.75
-  strand: ~
-  optional_args: ""
-cdhit:
+  # Worker threads; 0 lets SWARM choose.
   threads: 0
+  # Extra raw SWARM flags appended verbatim.
+  optional_args: ""
+
+## Reference clustering (CD-HIT)
+cdhit:
+  # Run the CD-HIT dereplication path.
   enabled: false
+  # Sequence identity threshold.
   identity: 0.97
+  # Worker threads; 0 lets CD-HIT choose.
+  threads: 0
+  # Extra raw CD-HIT flags appended verbatim.
+  optional_args: ""
+
+## Reference-based classification (VSEARCH)
+vsearch:
+  # Run the VSEARCH classification path.
+  enabled: true
+  # Minimum identity to accept a database hit.
+  identity: 0.75
+  # Minimum fraction of the query covered by an alignment.
+  query_cov: 0.8
+  # Search cut-offs; ~ uses the VSEARCH defaults.
+  maxaccepts: ~
+  maxrejects: ~
+  # Search strand: plus or both; ~ uses the VSEARCH default.
+  strand: ~
+  # Extra raw VSEARCH flags appended verbatim.
+  optional_args: ""
+
+## Taxonomy merge and tagging
+# Post-classification table filters, given as filter files under config/filters;
+# ~ applies none. Set per project (e.g. a host or off-target removal list).
+merge_taxa: ~
+tagging:
+  # Taxonomy side that drives categorisation and rank labels: VSEARCH or DADA2.
+  source: "VSEARCH"
+  # Drop rows whose count of unresolved _X placeholders exceeds this; -1 keeps all.
+  max_x: -1
+  # Composition category sets (config/compositions) to materialise on tables.
+  category_sets:
+    - "default"
+
+## Read QC reports
+fastqc:
+  # FastQC worker threads.
+  threads: 20
+  # Extra raw FastQC flags appended verbatim.
   optional_args: ""
 multiqc:
+  # Extra raw MultiQC flags appended verbatim.
   optional_args: ""
+
+## Annotation
+annotation:
+  # Finest taxonomic rank offered for manual contamination labelling and the
+  # rank charts: species, genus, family, order, class, division, supergroup.
+  max_rank: "genus"
+
+## Analysis and figures
+analysis:
+  # Composition categories to drop from figures, given as {set, category} pairs;
+  # each names a set in config/compositions/ and one of its categories. Set to []
+  # to exclude nothing. The default drops everything the whitelist-based
+  # 'contamination' set does not retain (see config/filters/eukaryome_whitelist.yml).
+  # apply_to lists the chart surfaces the exclusion acts on: diversity (alpha,
+  # NMDS, PERMANOVA), taxa (rank-tagged chart), composition (category-tagged
+  # chart), venn. Omit apply_to to act on all surfaces. Composition is left out
+  # here so the composition chart still shows the full make-up.
+  exclude_categories:
+    - set: contamination
+      category: Contaminant
+      apply_to: [diversity, taxa, venn]
+  # Depth normalisation before diversity: none or rarefy.
+  normalisation: none
+  # Rarefaction depth; 0 uses the minimum positive library size.
+  normalisation_depth: 0
+  alpha:
+    # Overlay individual sample points on the boxplots.
+    show_points: true
+    # Annotate group-wise significance on the alpha comparison.
+    annotate_significance: true
+    # Draw pairwise significance brackets between groups.
+    pairwise_brackets: true
+    # Treat groups as paired in the significance test.
+    paired_samples: true
+    # Significance test for the alpha comparison.
+    significance_test: "kruskal_wallis"

@@ -1,9 +1,10 @@
-# Unit tests for the composition route's table builder.
+# Unit tests for the composition routes.
 #
-# Exercises `Server._build_composition!` end-to-end against a synthetic merged
-# DuckDB, focusing on sub-group scoping: when subgroups are supplied, the
-# composed table must drop sample columns outside the chosen sub-groups and
-# rows whose summed reads across the kept columns are zero.
+# The sub-group scoping and double-counting cases from the old build path are
+# ported to the live summary path: a merged DuckDB is built in a temp dir with
+# sample columns A_s1, A_s2, B_s1 and a Domain column; `_composition_summary`
+# is then called directly with varying sub-group arguments and its output is
+# asserted against the same row/read totals the old build asserted.
 
 if !isdefined(Main, :Server)
     include(joinpath(@__DIR__, "..", "..", "src", "server", "server.jl"))
@@ -11,20 +12,6 @@ end
 SV = Main.Server
 
 @testset "Composition build" begin
-
-    ## Pure SQL fragment combiner: no DB or fixture needed.
-    @testset "_combine_where_clauses" begin
-        @test SV._combine_where_clauses() == ""
-        @test SV._combine_where_clauses("", "") == ""
-        @test SV._combine_where_clauses("WHERE a = 1", "") == "WHERE (a = 1)"
-        @test SV._combine_where_clauses("", "WHERE b > 0") == "WHERE (b > 0)"
-        ## Parentheses must preserve OR/AND precedence across fragments.
-        @test SV._combine_where_clauses("WHERE a = 1 OR x = 2", "WHERE b > 0") ==
-              "WHERE (a = 1 OR x = 2) AND (b > 0)"
-        ## A fragment missing the leading "WHERE " is still accepted.
-        @test SV._combine_where_clauses("a = 1", "b > 0") ==
-              "WHERE (a = 1) AND (b > 0)"
-    end
 
     @testset "sub-group scoping" begin
         tmp = mktempdir()
@@ -85,8 +72,8 @@ SV = Main.Server
 
             decode(resp) = JSON3.read(String(resp.body))
 
-            ## No sub-groups: every sample column, every row.
-            r0 = SV._build_composition!(study, run, "VSEARCH", "merged", "test_set")
+            ## No sub-group: every sample column, every row with nonzero reads.
+            r0 = SV._composition_summary(study, run, "test_set", nothing)
             @test r0.status == 200
             d0 = decode(r0)
             @test d0["total_rows"]  == 5
@@ -96,10 +83,9 @@ SV = Main.Server
             @test d0["categories"]["Unassigned"]["rows"]  == 2
             @test d0["categories"]["Unassigned"]["reads"] == 11  # 10+1
 
-            ## Sub-group A: drop B_s1 column; drop ASVs with A_s1+A_s2 == 0
-            ## (asv2 and asv5 fall out). Reads count only A_s1 and A_s2.
-            rA = SV._build_composition!(study, run, "VSEARCH", "merged", "test_set";
-                                        subgroups=["A"])
+            ## Sub-group A: only A_s1 and A_s2 count; rows with zero A reads
+            ## are excluded by the WHERE (row_sum) > 0 clause (asv2 and asv5 fall out).
+            rA = SV._composition_summary(study, run, "test_set", "A")
             @test rA.status == 200
             dA = decode(rA)
             @test dA["total_rows"]  == 3
@@ -109,29 +95,8 @@ SV = Main.Server
             @test dA["categories"]["Unassigned"]["rows"]  == 1
             @test dA["categories"]["Unassigned"]["reads"] == 10  # asv4
 
-            ## After the A-scoped build, the composed DuckDB must hold A_s1 and
-            ## A_s2 but not B_s1. This confirms the column-drop side of the
-            ## scoping, complementing the row-count assertions above.
-            comp_path = joinpath(tmp, "projects", study, run,
-                                 "composition", "VSEARCH", "composition.duckdb")
-            @test isfile(comp_path)
-            db2 = DuckDB.DB(comp_path; readonly=true)
-            c2  = DBInterface.connect(db2)
-            try
-                cols = String[string(r.column_name) for r in eachrow(DataFrame(
-                    DBInterface.execute(c2,
-                        "SELECT column_name FROM information_schema.columns " *
-                        "WHERE table_name = 'composition'")))]
-                @test "A_s1" in cols
-                @test "A_s2" in cols
-                @test !("B_s1" in cols)
-            finally
-                DBInterface.close!(c2); close(db2)
-            end
-
-            ## Sub-group B: drop A columns; ASVs with B_s1 == 0 fall out.
-            rB = SV._build_composition!(study, run, "VSEARCH", "merged", "test_set";
-                                        subgroups=["B"])
+            ## Sub-group B: only B_s1 counts; rows with B_s1 == 0 fall out.
+            rB = SV._composition_summary(study, run, "test_set", "B")
             @test rB.status == 200
             dB = decode(rB)
             @test dB["total_rows"]  == 3
@@ -141,20 +106,120 @@ SV = Main.Server
             @test dB["categories"]["Unassigned"]["rows"]  == 1
             @test dB["categories"]["Unassigned"]["reads"] == 1   # asv5
 
-            ## A and B together must reproduce the unrestricted totals exactly:
-            ## the sample columns are disjoint, so the union covers everything.
-            rAB = SV._build_composition!(study, run, "VSEARCH", "merged", "test_set";
-                                         subgroups=["A", "B"])
-            @test rAB.status == 200
-            dAB = decode(rAB)
-            @test dAB["total_rows"]  == 5
-            @test dAB["total_reads"] == 81
-
             ## A sub-group whose prefix matches no sample column is a client error.
-            rX = SV._build_composition!(study, run, "VSEARCH", "merged", "test_set";
-                                        subgroups=["X"])
+            rX = SV._composition_summary(study, run, "test_set", "X")
             @test rX.status == 400
             @test decode(rX)["error"] == "no_subgroup_samples"
+        finally
+            rm(tmp; recursive=true, force=true)
+        end
+    end
+
+    ## Feature 1: category-set colour persistence (save/delete round-trips).
+    @testset "category-set save and delete" begin
+        tmp = mktempdir()
+        try
+            SV.ServerState.set_root!(tmp)
+            cfg_comps = joinpath(tmp, "config", "compositions")
+            mkpath(cfg_comps)
+
+            ## A base set carrying both `filter` and `funcdb_require`, so we can
+            ## confirm those survive a colour-only save byte-for-byte.
+            write(joinpath(cfg_comps, "base.yml"), """
+            name: Base categories
+            description: Fixture base for save tests
+            categories:
+              - name: Protozoa
+                colour: "#3498db"
+                filter: protist.yml
+              - name: Pathogens
+                colour: "#800020"
+                filter: bacteria.yml
+                funcdb_require:
+                  human_pathogen: "yes"
+            """)
+
+            ## Save under a new name with one colour override; the base is untouched.
+            saved = SV._save_category_set("recoloured", "base",
+                Dict("Protozoa" => "#abcdef"))
+            @test saved isa AbstractDict   # a summary, not an error response
+            @test saved["name"] == "recoloured"
+            cat_by_name = Dict(c["name"] => c for c in saved["categories"])
+            @test cat_by_name["Protozoa"]["colour"] == "#abcdef"   # overridden
+            @test cat_by_name["Pathogens"]["colour"] == "#800020"  # preserved
+
+            ## The base YAML on disk is unchanged by a save-as.
+            base_reload = SV._load_category_set("base")
+            base_proto = first(c for c in base_reload["categories"] if c["name"] == "Protozoa")
+            @test base_proto["colour"] == "#3498db"
+
+            ## The saved set preserves every category's `filter` and
+            ## `funcdb_require` verbatim.
+            reload = SV._load_category_set("recoloured")
+            saved_by_name = Dict(c["name"] => c for c in reload["categories"])
+            @test saved_by_name["Protozoa"]["filter"] == "protist.yml"
+            @test saved_by_name["Pathogens"]["filter"] == "bacteria.yml"
+            @test saved_by_name["Pathogens"]["funcdb_require"]["human_pathogen"] == "yes"
+            ## Category order is stable (OrderedDict write).
+            @test [c["name"] for c in reload["categories"]] == ["Protozoa", "Pathogens"]
+
+            ## An invalid colour is rejected without touching disk.
+            bad = SV._save_category_set("bad", "base", Dict("Protozoa" => "blue"))
+            @test bad.status == 400
+            @test JSON3.read(String(bad.body))["error"] == "invalid_colour"
+            @test !isfile(joinpath(cfg_comps, "bad.yml"))
+
+            ## A missing base set is a 404.
+            nob = SV._save_category_set("x", "absent", Dict{String,String}())
+            @test nob.status == 404
+            @test JSON3.read(String(nob.body))["error"] == "base_not_found"
+
+            ## Delete removes the file and returns the name.
+            @test isfile(joinpath(cfg_comps, "recoloured.yml"))
+            del = SV._delete_category_set("recoloured")
+            @test del == "recoloured"
+            @test !isfile(joinpath(cfg_comps, "recoloured.yml"))
+
+            ## Deleting an absent set is a 404.
+            del2 = SV._delete_category_set("recoloured")
+            @test del2.status == 404
+            @test JSON3.read(String(del2.body))["error"] == "set_not_found"
+
+            ## `default` is protected even if a file exists.
+            write(joinpath(cfg_comps, "default.yml"), "name: Default\ncategories: []\n")
+            deld = SV._delete_category_set("default")
+            @test deld.status == 400
+            @test JSON3.read(String(deld.body))["error"] == "protected_set"
+            @test isfile(joinpath(cfg_comps, "default.yml"))
+        finally
+            rm(tmp; recursive=true, force=true)
+        end
+    end
+
+    ## Feature: Unassigned colour is persisted and resolved through the category set.
+    @testset "unassigned colour" begin
+        tmp = mktempdir()
+        try
+            SV.ServerState.set_root!(tmp)
+            comp_dir = joinpath(tmp, "config", "compositions")
+            mkpath(comp_dir)
+            write(joinpath(comp_dir, "base.yml"), """
+            name: Base
+            description: test
+            categories:
+              - name: Fungi
+                colour: "#f1c40f"
+                filter: fungi.pr2.yml
+            """)
+
+            # Saving an "Unassigned" colour writes the top-level field, not a category.
+            saved = SV._save_category_set("recol", "base",
+                Dict("Unassigned" => "#112233", "Fungi" => "#abcdef"))
+            @test saved["unassigned_colour"] == "#112233"
+            on_disk = SV._load_category_set("recol")
+            @test on_disk["unassigned_colour"] == "#112233"
+            @test all(c -> get(c, "name", "") != "Unassigned", on_disk["categories"])
+            @test SV._category_set_summary("recol", on_disk)["unassigned_colour"] == "#112233"
         finally
             rm(tmp; recursive=true, force=true)
         end

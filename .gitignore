@@ -295,9 +295,13 @@ node_modules/
 ### Tool paths, downloaded binaries and databases
 bin/
 databases/
+
+# Machine-level config: generated from config/defaults/ on first run
+# (new_project) and edited in place; never committed.
 config/tools.yml
 config/pipeline.yml
 config/databases.yml
+config/primers.yml
 
 ### Bits I don't want to share yet
 hide.*
@@ -310,3 +314,6 @@ archive/
 !.github
 !.github/**
 !.Rprofile
+
+# Brainstorming visual-companion scratch (mock-ups, server state)
+.superpowers/

@@ -48,7 +48,7 @@ export _section_stale, _write_section_hash, _stale_keys,
         :cdhit => ["cdhit"],
         :swarm => ["swarm"],
         :vsearch => ["vsearch"],
-        :merge_taxa => ["merge_taxa", "vsearch.enabled", "swarm.enabled", "dada2.taxonomy.enabled"],
+        :merge_taxa => ["merge_taxa", "tagging", "vsearch.enabled", "swarm.enabled", "dada2.taxonomy.enabled"],
     )
 
     function stage_sections(name::Symbol)::String

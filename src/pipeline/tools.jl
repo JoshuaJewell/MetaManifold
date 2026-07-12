@@ -344,6 +344,18 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         return TrimmedReads(cutadapt_dir)
     end
 
+    # Number of trimmed FASTQs cutadapt should have produced for `entries`.
+    # run_cutadapt keys off primary-read files only (one sample per R1, or per R2
+    # in reverse mode); paired mode then writes two trimmed files per sample, the
+    # single-end modes one. `entries` may be primary-only (subsampled path) or the
+    # full raw set (R1 + R2), so the count must be taken over primary reads rather
+    # than the raw length, else paired runs expect double and never skip.
+    function _expected_trimmed_count(entries, mode::AbstractString,
+                                     primary_pattern::Regex)::Int
+        n_primary = count(e -> occursin(primary_pattern, e.name), entries)
+        mode == "paired" ? 2 * n_primary : n_primary
+    end
+
     function cutadapt(project::ProjectCtx;
                       cutadapt_bin = tool_bin("cutadapt"))
         lbl          = basename(project.dir)
@@ -395,11 +407,11 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         primers_mtime = mtime(primers_path)
         input_mtime   = isempty(raw_mtimes) ? primers_mtime : max(primers_mtime, maximum(raw_mtimes))
 
-        expected_trimmed = mode == "paired" ? 2 * length(selected_entries) : length(selected_entries)
+        expected_trimmed = _expected_trimmed_count(selected_entries, mode, primary_pattern)
         if isdir(cutadapt_dir)
             trimmed = filter(f -> endswith(f, "_trimmed.fastq.gz"), readdir(cutadapt_dir))
             if !isempty(trimmed) &&
-               length(trimmed) >= expected_trimmed &&
+               length(trimmed) == expected_trimmed &&
                !_section_stale(config_path, stage_sections(:cutadapt), hash_file) &&
                all(f -> mtime(joinpath(cutadapt_dir, f)) > input_mtime, trimmed) &&
                all(f -> filesize(joinpath(cutadapt_dir, f)) > 20, trimmed)

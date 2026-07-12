@@ -10,7 +10,7 @@ using ..DiversityMetrics: richness, shannon, simpson, normalise_counts,
 export sample_columns, filtered_counts, filtered_df, taxonomy_levels, taxon_column,
        aggregate_by_taxon, combined_counts_across_runs, combined_asv_counts_across_runs,
        sequence_column_name, pool_columns,
-       alpha_chart, taxa_bar_chart, pipeline_stats_chart,
+       alpha_chart, bar_chart, taxa_bar_chart, pipeline_stats_chart,
        alpha_boxplot, nmds_chart,
        run_nmds, run_permanova, r_available,
        venn_taxa_present
@@ -81,18 +81,19 @@ function taxonomy_levels(con, table::String)
 end
 
 """
-    taxon_column(columns, rank) -> String
+    taxon_column(columns, rank) -> Union{String, Nothing}
 
 Resolve a canonical rank name (e.g. "Genus") to the actual column name present in
 the table. Checks for the plain name first (VSEARCH), then the DADA2-suffixed variant.
-Falls back to the plain name if neither is found (SQL will error explicitly).
+Returns `nothing` when neither form is present, so callers can emit a clean 400
+rather than interpolating an unvalidated rank string into a SQL identifier.
 """
 function taxon_column(columns::Union{Vector{String}, AbstractSet{String}}, rank::String)
     col_set = columns isa AbstractSet ? columns : Set(columns)
     rank in col_set && return rank
     dada2 = rank * "_dada2"
     dada2 in col_set && return dada2
-    rank
+    nothing
 end
 
 """
@@ -374,25 +375,31 @@ function pool_columns(sample_names::Vector{String}, counts::Matrix{Float64},
     (pooled_names, reduce(hcat, pooled_cols))
 end
 
-## Taxa bar chart
+## Generic bar chart
 """
-    taxa_bar_chart(taxon_labels, sample_names, counts; top_n, relative) -> Dict
+    bar_chart(segment_labels, sample_names, counts; top_n, relative, mode, colour_for) -> Dict
 
-Stacked bar chart of taxonomic composition.
-`counts` is a taxa-by-samples matrix (from aggregate_by_taxon output).
+Label-agnostic stacked or grouped bar chart.
+`counts` is a segments-by-samples matrix.
+`mode` is "stacked" or "grouped"; sets Plotly barmode to "stack" or "group".
+`colour_for` is an optional `label -> hex` function; when `nothing`, the
+built-in palette plus grey for Other/Unclassified/Unassigned is used.
 """
-function taxa_bar_chart(taxon_labels::Vector{String},
-                        sample_names::Vector{String},
-                        counts::Matrix{Float64};
-                        top_n::Int=15, relative::Bool=true)
-    n_taxa = length(taxon_labels)
+function bar_chart(segment_labels::Vector{String},
+                   sample_names::Vector{String},
+                   counts::Matrix{Float64};
+                   top_n::Int=15,
+                   relative::Bool=true,
+                   mode::String="stacked",
+                   colour_for=nothing)
+    n_segments = length(segment_labels)
 
     # Drop samples (columns) that contain no data before plotting.
     col_totals = vec(sum(counts, dims=1))
     empty_mask = col_totals .== 0
     if any(empty_mask)
         dropped = sample_names[empty_mask]
-        @info "Taxa bar: dropping $(length(dropped)) empty sample column(s)" samples=dropped
+        @info "bar_chart: dropping $(length(dropped)) empty sample column(s)" samples=dropped
         keep_cols = .!empty_mask
         counts = counts[:, keep_cols]
         sample_names = sample_names[keep_cols]
@@ -402,14 +409,14 @@ function taxa_bar_chart(taxon_labels::Vector{String},
     totals = vec(sum(counts, dims=2))
     order = sortperm(totals, rev=true)
 
-    if n_taxa > top_n
+    if n_segments > top_n
         keep = order[1:top_n]
         other = vec(sum(counts[order[(top_n+1):end], :], dims=1))
         counts = vcat(counts[keep, :], other')
-        final_labels = vcat(taxon_labels[keep], ["Other"])
+        final_labels = vcat(segment_labels[keep], ["Other"])
     else
         counts = counts[order, :]
-        final_labels = taxon_labels[order]
+        final_labels = segment_labels[order]
     end
 
     if relative
@@ -420,10 +427,17 @@ function taxa_bar_chart(taxon_labels::Vector{String},
     end
 
     n_final = length(final_labels)
-    colours = _palette_hex(n_final)
-    _apply_grey!(colours, final_labels)
+    # Resolve colours: caller-supplied function takes priority over palette.
+    if isnothing(colour_for)
+        colours = _palette_hex(n_final)
+        _apply_grey!(colours, final_labels)
+    else
+        colours = [colour_for(final_labels[i]) for i in 1:n_final]
+    end
+
     ylabel = relative ? "Relative abundance" : "Read count"
-    title = relative ? "Taxonomic composition" : "Taxonomic composition (absolute)"
+    title_text = relative ? "Composition" : "Composition (absolute)"
+    barmode = (mode == "grouped" || mode == "group") ? "group" : "stack"
 
     traces = [Dict{String,Any}(
         "type" => "bar", "name" => final_labels[i],
@@ -432,14 +446,32 @@ function taxa_bar_chart(taxon_labels::Vector{String},
     ) for i in 1:n_final]
 
     layout = Dict{String,Any}(
-        "barmode" => "stack",
-        "title" => Dict("text" => title),
+        "barmode" => barmode,
+        "title" => Dict("text" => title_text),
         "xaxis" => Dict("title" => "Sample", "tickangle" => -45),
         "yaxis" => Dict{String,Any}("title" => ylabel),
         "legend" => Dict("traceorder" => "normal"),
     )
-    relative && (layout["yaxis"]["range"] = [0, 1])
+    # Fix the y-axis range to [0, 1] only in stacked relative mode; a grouped
+    # chart can have bars that individually exceed 1.0 even when relativised.
+    (relative && mode == "stacked") && (layout["yaxis"]["range"] = [0, 1])
     Dict("data" => traces, "layout" => layout)
+end
+
+## Taxa bar chart
+"""
+    taxa_bar_chart(taxon_labels, sample_names, counts; top_n, relative) -> Dict
+
+Stacked bar chart of taxonomic composition.
+Delegates to `bar_chart` with palette colouring and stacked mode.
+`counts` is a taxa-by-samples matrix (from aggregate_by_taxon output).
+"""
+function taxa_bar_chart(taxon_labels::Vector{String},
+                        sample_names::Vector{String},
+                        counts::Matrix{Float64};
+                        top_n::Int=15, relative::Bool=true)
+    bar_chart(taxon_labels, sample_names, counts;
+              top_n=top_n, relative=relative, mode="stacked", colour_for=nothing)
 end
 
 ## Pipeline stats chart
@@ -701,7 +733,7 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
             append!(panel_sample_ids, sample_ids)
             values_by_label[label] = vals
             line_colour = colours[gi]
-            fill_colour = _hex_to_rgba(colours[gi], show_points ? 0.28 : 0.75)
+            fill_colour = _hex_to_rgba(colours[gi], 0.8)
             customdata = Any[
                 [sample_ids[i], richness_values[i], shannon_values[i], simpson_values[i]]
                 for i in eachindex(sample_ids)
@@ -718,10 +750,10 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
                 "jitter" => show_points ? 0.35 : 0.0,
                 "pointpos" => show_points ? 0.0 : 0.0,
                 "marker" => Dict(
-                    "color" => show_points ? _hex_to_rgba(line_colour, 0.65) : line_colour,
-                    "size" => show_points ? 7 : 8,
+                    "color" => show_points ? _hex_to_rgba(line_colour, 0.8) : line_colour,
+                    "size" => show_points ? 8.4 : 9.6,
                     "opacity" => 1.0,
-                    "line" => Dict("color" => "#ffffff", "width" => show_points ? 0.75 : 0.0),
+                    "line" => Dict("color" => "#ffffff", "width" => show_points ? 0.9 : 0.0),
                 ),
                 "showlegend" => pi == 1,
                 "legendgroup" => label,

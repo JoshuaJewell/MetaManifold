@@ -8,6 +8,24 @@ import styles from './DataTable.module.css'
 const blastUrl = (seq: string) =>
   `https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&DATABASE=nt&CMD=Put&ENTREZ_QUERY=NOT+uncultured+organism%5Borganism%5D+NOT+environmental+sample%5Borganism%5D&QUERY=${encodeURIComponent(seq)}`
 
+// Star marker for the row-highlight toggle; filled when the row is highlighted,
+// outlined otherwise. Uses currentColor so it follows the button's theme colour.
+const StarIcon = ({ filled }: { filled: boolean }) => (
+  <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"
+    fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.5">
+    <path d="M12 2.6l2.7 5.9 6.4.6-4.8 4.2 1.4 6.3L12 16.9 6.3 19.6l1.4-6.3L2.9 9.1l6.4-.6z" />
+  </svg>
+)
+
+// Copy text to the clipboard and briefly flash the clicked element as feedback.
+const flashCopy = (text: string) => (e: React.MouseEvent<HTMLElement>) => {
+  navigator.clipboard.writeText(text)
+  const el = e.currentTarget
+  el.classList.remove(styles.copied)
+  void el.offsetWidth
+  el.classList.add(styles.copied)
+}
+
 export interface RowPopupData {
   columns: string[]
   rows: Record<string, unknown>[]
@@ -25,7 +43,7 @@ interface Props {
   refreshKey?: string | number | null
   /** Stable key for persisting column visibility, sort, and filters to sessionStorage. */
   storageKey?: string
-  distinctFetcher?: (column: string, activeFilters?: Record<string, ColFilter>) => Promise<DistinctInfo>
+  distinctFetcher?: (column: string, activeFilters?: Record<string, ColFilter>, keywordFilter?: string) => Promise<DistinctInfo>
   rowPopupFetcher?: (row: Record<string, unknown>) => Promise<RowPopupData | null>
   /** Extra columns available only in the popup (e.g. merged table columns not in merged_otu). */
   popupColumns?: string[]
@@ -51,6 +69,7 @@ interface PersistedTableState {
   sortDir?: SortDir
   colFilters?: Record<string, ColFilter>
   activePreset?: 'vsearch' | 'dada2' | null
+  highlighted?: string[]
 }
 
 function loadPersistedState(key: string): PersistedTableState | null {
@@ -82,6 +101,9 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
   const [stickyCols, setStickyCols] = useState<Set<string>>(new Set(persisted?.stickyCols))
   const [showColPicker, setShowColPicker] = useState(false)
   const [activePreset, setActivePreset] = useState<'vsearch' | 'dada2' | null>(persisted?.activePreset ?? null)
+  // Manually highlighted rows, keyed by stable row identity so a highlight
+  // survives filtering, sorting, and paging, and reappears when a filter clears.
+  const [highlighted, setHighlighted] = useState<Set<string>>(new Set(persisted?.highlighted))
   const colPickerRef = useRef<HTMLDivElement>(null)
 
   const [popupData, setPopupData]       = useState<RowPopupData | null>(null)
@@ -154,8 +176,9 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
       sortDir,
       colFilters,
       activePreset,
+      highlighted: [...highlighted],
     })
-  }, [storageKey, hiddenCols, stickyCols, sortBy, sortDir, colFilters, activePreset])
+  }, [storageKey, hiddenCols, stickyCols, sortBy, sortDir, colFilters, activePreset, highlighted])
 
   const bound = useCallback(() => {
     const q: TableQuery = { page, perPage }
@@ -196,6 +219,10 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
   const extraPopupCols = (popupColumns ?? []).filter(c => !tableColSet.has(c))
   const pickerCols = [...allCols, ...extraPopupCols]
   const popupOnlySet = new Set(extraPopupCols)
+  // Count visible columns from the current set directly. Deriving it by
+  // subtraction (pickerCols.length - hiddenCols.size) underflows when hiddenCols
+  // retains columns absent from the present view, e.g. after switching runs.
+  const visibleColCount = pickerCols.filter(c => !hiddenCols.has(c)).length
 
   useEffect(() => {
     if (!showColPicker) return
@@ -288,9 +315,24 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
     setPage(1)
   }
 
+  // Stable identity for a row; prefers a natural key so highlights track the
+  // row rather than its transient position after filtering or sorting.
+  const rowKey = (row: Record<string, unknown>): string => {
+    const id = row['SeqName'] ?? row['sequence']
+    return id != null ? String(id) : JSON.stringify(row)
+  }
+  const toggleHighlight = (key: string) => setHighlighted(prev => {
+    const next = new Set(prev)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    return next
+  })
+
+  // The leading highlight handle is a sticky column at left:0; data sticky
+  // columns begin after its width.
+  const HANDLE_W = 34
   const stickyOffsets = new Map<string, number>()
   {
-    let offset = 0
+    let offset = HANDLE_W
     for (const c of cols) {
       if (stickyCols.has(c)) {
         stickyOffsets.set(c, offset)
@@ -316,7 +358,7 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
           <div style={{ position: 'relative' }}>
             <button className="btn" style={{ fontSize: '.78rem', padding: '3px 8px' }}
               onClick={() => setShowColPicker(v => !v)}>
-              Columns{hiddenCols.size > 0 ? ` (${pickerCols.length - hiddenCols.size}/${pickerCols.length})` : ''}
+              Columns{visibleColCount < pickerCols.length ? ` (${visibleColCount}/${pickerCols.length})` : ''}
             </button>
             {showColPicker && (
               <div ref={colPickerRef} className={styles.dropdown}
@@ -367,6 +409,14 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
               {allCountsHidden ? 'Show counts' : 'Hide counts'}
             </button>
         )}
+        {highlighted.size > 0 && (
+          <button
+            className="btn"
+            style={{ fontSize: '.78rem', padding: '3px 8px' }}
+            onClick={() => setHighlighted(new Set())}
+            title="Clear all highlighted rows"
+          >Clear highlights ({highlighted.size})</button>
+        )}
       </div>
 
       {error && <p className={styles.error}>{error}</p>}
@@ -379,6 +429,10 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
             <table className={styles.table}>
               <thead>
                 <tr>
+                  <th className={styles.handleCol}
+                    style={{ position: 'sticky', left: 0, zIndex: 12, width: HANDLE_W, background: 'var(--color-surface)' }}
+                    title="Highlight rows"
+                  ></th>
                   {cols.map(c => {
                     const isSticky = stickyCols.has(c)
                     const stickyStyle: React.CSSProperties | undefined = isSticky ? {
@@ -406,6 +460,7 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
                             column={c}
                             distinctFetcher={distinctFetcher}
                             activeFilters={colFilters}
+                            keywordFilter={filter}
                             current={colFilters[c]}
                             isSticky={isSticky}
                             onToggleSticky={() => toggleSticky(c)}
@@ -421,19 +476,31 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={cols.length + (hasSequenceCol || extraRowActions ? 1 : 0)} className={styles.msg} style={{ textAlign: 'center' }}>Loading...</td></tr>
+                  <tr><td colSpan={cols.length + 1 + (hasSequenceCol || extraRowActions ? 1 : 0)} className={styles.msg} style={{ textAlign: 'center' }}>Loading...</td></tr>
                 )}
                 {!loading && rows.length === 0 && (
-                  <tr><td colSpan={cols.length + (hasSequenceCol || extraRowActions ? 1 : 0)} className={styles.msg} style={{ textAlign: 'center' }}>
+                  <tr><td colSpan={cols.length + 1 + (hasSequenceCol || extraRowActions ? 1 : 0)} className={styles.msg} style={{ textAlign: 'center' }}>
                     {hasAnyFilter ? 'No matching rows.' : 'No data.'}
                   </td></tr>
                 )}
-                {!loading && rows.map((row, i) => (
+                {!loading && rows.map((row, i) => {
+                  const rk = rowKey(row)
+                  const isHighlighted = highlighted.has(rk)
+                  return (
                   <tr key={i}
                     onMouseEnter={rowPopupFetcher ? e => { keepPopup(); startPopup(row, i, e) } : undefined}
                     onMouseLeave={rowPopupFetcher ? cancelPopup : undefined}
-                    className={popupRowIdx === i ? styles.popupActiveRow : undefined}
+                    className={[popupRowIdx === i ? styles.popupActiveRow : '', isHighlighted ? styles.highlightRow : ''].filter(Boolean).join(' ') || undefined}
                   >
+                    <td className={styles.handleCol}
+                      style={{ position: 'sticky', left: 0, zIndex: 1, width: HANDLE_W, background: 'var(--color-bg)' }}
+                    >
+                      <button
+                        className={`${styles.highlightBtn}${isHighlighted ? ' ' + styles.highlightBtnOn : ''}`}
+                        onClick={e => { e.stopPropagation(); toggleHighlight(rk) }}
+                        title={isHighlighted ? 'Remove highlight' : 'Highlight row'}
+                      ><StarIcon filled={isHighlighted} /></button>
+                    </td>
                     {cols.map(c => {
                       const isSticky = stickyCols.has(c)
                       const stickyStyle: React.CSSProperties | undefined = isSticky ? {
@@ -450,13 +517,7 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
                       const display = cellLabels?.[c]?.[text] ?? text
                       return (
                         <td key={c} style={stickyStyle}
-                          onClick={e => {
-                            navigator.clipboard.writeText(text)
-                            const el = e.currentTarget
-                            el.classList.remove(styles.copied)
-                            void el.offsetWidth
-                            el.classList.add(styles.copied)
-                          }}
+                          onClick={flashCopy(text)}
                           title="Click to copy"
                         >{display}</td>
                       )
@@ -476,7 +537,8 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
                       </td>
                     )}
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -514,13 +576,7 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
                                 const text = String(r[c] ?? '')
                                 return (
                                   <td key={c}
-                                    onClick={e => {
-                                      navigator.clipboard.writeText(text)
-                                      const el = e.currentTarget
-                                      el.classList.remove(styles.copied)
-                                      void el.offsetWidth
-                                      el.classList.add(styles.copied)
-                                    }}
+                                    onClick={flashCopy(text)}
                                     title="Click to copy"
                                   >{text}</td>
                                 )
@@ -559,10 +615,11 @@ export function DataTable({ fetcher, refreshKey, storageKey, distinctFetcher, ro
   )
 }
 
-function ColumnDropdown({ column, distinctFetcher, activeFilters, current, isSticky, onToggleSticky, onApply, onClose }: {
+function ColumnDropdown({ column, distinctFetcher, activeFilters, keywordFilter, current, isSticky, onToggleSticky, onApply, onClose }: {
   column:          string
-  distinctFetcher: (col: string, activeFilters?: Record<string, ColFilter>) => Promise<DistinctInfo>
+  distinctFetcher: (col: string, activeFilters?: Record<string, ColFilter>, keywordFilter?: string) => Promise<DistinctInfo>
   activeFilters:   Record<string, ColFilter>
+  keywordFilter?:  string
   current?:        ColFilter
   isSticky:        boolean
   onToggleSticky:  () => void
@@ -581,11 +638,11 @@ function ColumnDropdown({ column, distinctFetcher, activeFilters, current, isSti
       if (col !== column) otherFilters[col] = f
     }
     const hasOther = Object.keys(otherFilters).length > 0
-    distinctFetcher(column, hasOther ? otherFilters : undefined)
+    distinctFetcher(column, hasOther ? otherFilters : undefined, keywordFilter || undefined)
       .then(d => { if (!cancelled) setInfo(d) })
       .catch(e => { if (!cancelled) setLoadError(e.message ?? 'Failed to load') })
     return () => { cancelled = true }
-  }, [column, distinctFetcher, activeFilters])
+  }, [column, distinctFetcher, activeFilters, keywordFilter])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -686,6 +743,15 @@ function TextFilter({ values, current, onApply }: {
   )
 }
 
+// A single numeric statistic; clicking it copies the raw (unformatted) value.
+function Stat({ value, fmt }: { value: number; fmt: (v: number) => string }) {
+  return (
+    <span className={styles.statValue} onClick={flashCopy(String(value))} title="Click to copy">
+      {fmt(value)}
+    </span>
+  )
+}
+
 function NumericFilter({ dataMin, dataMax, sum, mean, median, q1, q3, currentMin, currentMax, onApply }: {
   dataMin:     number
   dataMax:     number
@@ -716,11 +782,11 @@ function NumericFilter({ dataMin, dataMax, sum, mean, median, q1, q3, currentMin
     <>
       {(sum != null || mean != null || median != null || q1 != null) && (
         <div className={styles.numericInfo} style={{ fontSize: '.75rem', color: 'var(--color-muted-fg)' }}>
-          {sum != null && <div>Sum: {fmt(sum)}</div>}
-          <div>Range: {fmt(dataMin)} - {fmt(dataMax)}</div>
-          {q1 != null && q3 != null && <div>IQR: {fmt(q1)} - {fmt(q3)}</div>}
-          {mean != null && <div>Mean: {fmt(mean)}</div>}
-          {median != null && <div>Median: {fmt(median)}</div>}
+          {sum != null && <div>Sum: <Stat value={sum} fmt={fmt} /></div>}
+          <div>Range: <Stat value={dataMin} fmt={fmt} /> - <Stat value={dataMax} fmt={fmt} /></div>
+          {q1 != null && q3 != null && <div>IQR: <Stat value={q1} fmt={fmt} /> - <Stat value={q3} fmt={fmt} /></div>}
+          {mean != null && <div>Mean: <Stat value={mean} fmt={fmt} /></div>}
+          {median != null && <div>Median: <Stat value={median} fmt={fmt} /></div>}
         </div>
       )}
       <div className={styles.numericInputs}>

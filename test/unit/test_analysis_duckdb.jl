@@ -90,8 +90,8 @@
         @test Analysis.taxon_column(vsearch_cols, "Family") == "Family"
         @test Analysis.taxon_column(dada2_cols,   "Genus")  == "Genus_dada2"
         @test Analysis.taxon_column(dada2_cols,   "Family") == "Family_dada2"
-        # Falls back to plain name when neither exists
-        @test Analysis.taxon_column(vsearch_cols, "Order")  == "Order"
+        # Returns nothing when neither the plain name nor the _dada2 variant exists.
+        @test isnothing(Analysis.taxon_column(vsearch_cols, "Order"))
     end
 
     @testset "sequence_column_name" begin

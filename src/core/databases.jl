@@ -36,14 +36,14 @@ export ensure_databases, resolve_db, make_db_meta
     """
     function ensure_databases(config_path::String)
         if !isfile(config_path)
-            example_path = joinpath(dirname(config_path), "databases.example.yml")
-            if isfile(example_path)
-                cp(example_path, config_path)
-                @warn "ensure_databases: $config_path not found - copied from $example_path. " *
+            template_path = joinpath(dirname(config_path), "defaults", "databases.yml")
+            if isfile(template_path)
+                cp(template_path, config_path)
+                @warn "ensure_databases: $config_path not found - copied from $template_path. " *
                     "Set local: paths for any pre-downloaded databases."
             else
                 @warn "ensure_databases: $config_path not found. " *
-                    "Copy config/databases.example.yml to config/databases.yml and set local: paths."
+                    "Copy config/defaults/databases.yml to config/databases.yml and set local: paths."
                 return Dict{String,String}()
             end
         end

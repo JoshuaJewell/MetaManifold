@@ -155,6 +155,14 @@
   font-size:  .75rem;
   color:      var(--color-muted-fg);
 }
+.statValue {
+  cursor:        pointer;
+  border-radius: 3px;
+  padding:       0 2px;
+  color:         var(--color-fg);
+}
+.statValue:hover { background: var(--color-surface); }
+.statValue.copied { animation: copyFlash .35s ease-out; }
 
 .numericInputs {
   display:        flex;
@@ -206,6 +214,30 @@
 
 .table tr:last-child td { border-bottom: none; }
 .table tr:hover td { background: var(--color-surface); }
+
+.handleCol {
+  padding:    0;
+  text-align: center;
+}
+.highlightBtn {
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  border:          none;
+  background:       none;
+  cursor:          pointer;
+  padding:         2px 4px;
+  color:           var(--color-muted-fg);
+  opacity:         0.35;
+  transition:      opacity .12s ease-out, color .12s ease-out;
+}
+.table tr:hover .highlightBtn { opacity: 0.75; }
+.highlightBtn.highlightBtnOn {
+  color:   #e0a92e;
+  opacity: 1;
+}
+.table tr.highlightRow td { background: rgba(224, 169, 46, 0.16); }
+.table tr.highlightRow:hover td { background: rgba(224, 169, 46, 0.24); }
 
 .pager {
   display:         flex;

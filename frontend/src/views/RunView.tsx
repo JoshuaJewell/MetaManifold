@@ -15,11 +15,11 @@ import { NameDialog } from '../components/NameDialog'
 import { ComparisonPanel } from '../components/ComparisonPanel'
 import { AnnotationPanel } from '../components/AnnotationPanel'
 import { CompositionPanel } from '../components/CompositionPanel'
-import type { TableMeta, TableQuery, ColFilter, FilterPreset, ConfigMap, RunStages } from '../api/types'
+import { TaxaCompositionChart } from '../components/TaxaCompositionChart'
+import type { TableMeta, TableQuery, ColFilter, FilterPreset, ConfigMap, RunStages, AnnotationSource } from '../api/types'
 import type { RowPopupData, TableStats } from '../components/DataTable'
-import { discoverAnnotationOptions, type AnalysisOption } from '../components/annotationShared'
 
-type Tab = 'pipeline' | 'qc' | 'dada2' | 'tables' | 'annotation' | 'composition'
+type Tab = 'pipeline' | 'qc' | 'dada2' | 'tables' | 'composition'
 
 // Maps tabs to the backend stages whose staleness should show a yellow dot
 const TAB_STALE_STAGES: Partial<Record<Tab, string[]>> = {
@@ -122,6 +122,16 @@ export function RunView({ runName }: { runName?: string } = {}) {
     return stages.map(s => `${s.status}:${s.last_run ?? ''}`).join('|')
   }, [runData])
 
+  // Keep AnnotationPanel typechecked while the FuncDB tab is quarantined.
+  void AnnotationPanel
+
+  // Stable run specs for the cross-group comparison; a fresh array each render
+  // would re-fire ComparisonPanel's table-discovery effect needlessly.
+  const comparisonRuns = useMemo(
+    () => (runData?.subgroups ?? []).map(sg => ({ run: run!, group: group ?? null, prefix: sg })),
+    [runData?.subgroups, run, group],
+  )
+
   return (
     <>
       <div className="page-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
@@ -154,12 +164,11 @@ export function RunView({ runName }: { runName?: string } = {}) {
       )}
 
       <div className="tabs">
-        {(['pipeline', 'qc', 'dada2', 'tables', 'annotation', 'composition'] as Tab[]).map(t => {
+        {(['pipeline', 'qc', 'dada2', 'tables', 'composition'] as Tab[]).map(t => {
           const label = t === 'pipeline' ? 'Pipeline'
             : t === 'qc' ? 'QC'
             : t === 'dada2' ? 'DADA2'
             : t === 'tables' ? `Tables (${tables?.length ?? 0})`
-            : t === 'annotation' ? 'Annotation'
             : 'Composition'
           const stale = isTabStale(t)
           return (
@@ -189,15 +198,21 @@ export function RunView({ runName }: { runName?: string } = {}) {
 
       {tab === 'qc' && <QCPanel study={study!} run={run!} group={group} qcData={qcData ?? null} stages={runData?.stages ?? null} onRunStage={handleRunStage} configMap={configMap} cacheKey={runData?.stages?.fastqc?.last_run ?? null} />}
       {tab === 'dada2' && <DADA2Panel study={study!} run={run!} group={group} dada2Data={dada2Data ?? null} configMap={configMap ?? null} onConfigChanged={handleConfigChanged} stages={runData?.stages ?? null} onRunStage={handleRunStage} cacheKey={runData?.stages?.dada2_denoise?.last_run ?? null} />}
-      {tab === 'tables' && <TablesPanel study={study!} run={run!} group={group} tables={tables ?? []} onTablesChanged={refetchTables} cacheKey={tablesCacheKey} />}
-      {tab === 'annotation' && <AnnotationPanel study={study!} run={run!} group={group} subgroups={runData?.subgroups} />}
-
-      {tab === 'composition' && <CompositionPanel study={study!} run={run!} group={group} subgroups={runData?.subgroups} />}
+      {tab === 'tables' && <TablesPanel study={study!} run={run!} group={group} subgroups={runData?.subgroups} tables={tables ?? []} onTablesChanged={refetchTables} cacheKey={tablesCacheKey} />}
+      {tab === 'composition' && (
+        <CompositionPanel
+          study={study!}
+          run={run!}
+          group={group}
+          subgroups={runData?.subgroups}
+          source={(configMap?.['tagging.source']?.value as AnnotationSource | undefined) ?? 'VSEARCH'}
+        />
+      )}
 
       {runData?.pooled && runData.subgroups.length >= 2 && (
         <ComparisonPanel
           study={study!}
-          runs={runData.subgroups.map(sg => ({ run: run!, group: group ?? null, prefix: sg }))}
+          runs={comparisonRuns}
         />
       )}
     </>
@@ -553,7 +568,7 @@ function DADA2Panel({ study, run, group, dada2Data, configMap, onConfigChanged, 
   )
 }
 
-function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: { study: string; run: string; group?: string; tables: TableMeta[]; onTablesChanged: () => void; cacheKey?: string | null }) {
+function TablesPanel({ study, run, group, subgroups, tables, onTablesChanged, cacheKey }: { study: string; run: string; group?: string; subgroups?: string[]; tables: TableMeta[]; onTablesChanged: () => void; cacheKey?: string | null }) {
   const [selected, setSelected] = useState<string | null>(tables[0]?.id ?? null)
 
   useEffect(() => {
@@ -581,8 +596,8 @@ function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: {
   )
 
   const distinctFetcher = useCallback(
-    (column: string, activeFilters?: Record<string, ColFilter>) =>
-      api.results.distinctValues(study, run, selected!, column, activeFilters, group),
+    (column: string, activeFilters?: Record<string, ColFilter>, keywordFilter?: string) =>
+      api.results.distinctValues(study, run, selected!, column, activeFilters, group, keywordFilter),
     [study, run, selected, group],
   )
 
@@ -831,7 +846,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: {
       {selected && (
         <>
           <DataTable
-            key={filterKey}
+            key={`tbl:${study}/${run}/${group ?? ''}/${selected}:${filterKey}`}
             storageKey={`tbl:${study}/${run}/${group ?? ''}/${selected}`}
             fetcher={fetcher}
             refreshKey={cacheKey}
@@ -847,7 +862,7 @@ function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: {
           />
           <AnalysisPanel
             study={study} run={run} group={group}
-            table={selected} filters={filters}
+            table={selected} filters={filters} subgroups={subgroups}
           />
         </>
       )}
@@ -855,54 +870,33 @@ function TablesPanel({ study, run, group, tables, onTablesChanged, cacheKey }: {
   )
 }
 
-function AnalysisPanel({ study, run, group, table, filters }: {
+function AnalysisPanel({ study, run, group, table, filters, subgroups }: {
   study: string; run: string; group?: string; table: string
   filters: Record<string, ColFilter>
+  subgroups?: string[]
 }) {
-  const [analysisTables, setAnalysisTables] = useState<AnalysisOption[]>([])
-  const [analysisKey, setAnalysisKey] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    discoverAnnotationOptions(study, run, group).then(options => {
-      if (cancelled) return
-      setAnalysisTables(options)
-      const preferred = options.find(o => o.table === table) ?? options[0] ?? null
-      setAnalysisKey(current => current && options.some(o => o.key === current) ? current : preferred?.key ?? null)
-    })
-    return () => { cancelled = true }
-  }, [study, run, group, table])
-
-  const selectedAnalysis = useMemo(
-    () => analysisTables.find(option => option.key === analysisKey) ?? null,
-    [analysisTables, analysisKey],
-  )
-
-  const analysis = useAnalysis({
-    study, run, group,
-    table: selectedAnalysis?.table ?? null,
-    source: selectedAnalysis?.source,
-    colFilters: filters,
-  })
-
-  const body = selectedAnalysis ? { table: selectedAnalysis.table, source: selectedAnalysis.source, colFilters: filters } : null
-
-  const tableSelector = analysisTables.length > 1 ? (
-    <select value={analysisKey ?? ''} onChange={e => setAnalysisKey(e.target.value)}
-      style={{ padding: '4px 8px', borderRadius: 4, border: '1px solid var(--color-border)',
-               fontSize: '.82rem', background: 'var(--color-bg)' }}>
-      {analysisTables.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}
-    </select>
-  ) : analysisTables.length === 1 ? (
-    <code>{analysisTables[0].label}</code>
-  ) : (
-    <span style={{ fontSize: '.82rem', color: 'var(--color-muted-fg)' }}>No annotated tables available</span>
-  )
+  // Analysis runs directly on the selected results table; the merged results DB
+  // carries taxonomy ranks and Category__ columns, so there is no separate
+  // annotation table to discover.
+  const analysis = useAnalysis({ study, run, group, table, colFilters: filters })
+  const body = { table, colFilters: filters }
 
   return (
-    <AnalysisControls {...analysis} body={body}>
-      {tableSelector}
-    </AnalysisControls>
+    <>
+      <AnalysisControls {...analysis} body={body}>
+        <code>{table}</code>
+      </AnalysisControls>
+      <div style={{ marginTop: 16 }}>
+        <TaxaCompositionChart
+          study={study}
+          run={run}
+          group={group}
+          subgroups={subgroups}
+          defaultTag="rank"
+          table={table}
+        />
+      </div>
+    </>
   )
 }
 

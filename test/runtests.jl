@@ -19,6 +19,7 @@ using MetaManifold.Databases, MetaManifold.DuckDBStore, MetaManifold.Validation
 using MetaManifold.Tools, MetaManifold.TaxonomyTableTools, MetaManifold.ProjectSetup
 using MetaManifold.DiversityMetrics, MetaManifold.Analysis
 using MetaManifold.FuncDBAnnotation
+using MetaManifold.Categories
 
 ## Unit tests (always run)
 @testset "MetabarcodingPipeline" begin
@@ -39,6 +40,7 @@ using MetaManifold.FuncDBAnnotation
     include("unit/test_funcdb.jl")
     include("unit/test_routes.jl")
     include("unit/test_composition.jl")
+    include("unit/test_categories.jl")
 
     ## Integration tests (opt-in)
     if RUN_INTEGRATION

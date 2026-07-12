@@ -1,5 +1,6 @@
-# Template for tool path configuration. Copy to config/tools.yml and edit as
-# needed, or run install.sh to generate it automatically.
+# Template for tool path configuration. This is the default; new_project
+# copies it to config/tools.yml on first run, or install.sh generates that
+# copy. Edit the machine copy, not this template.
 #
 # Path options:
 #   null              - use the managed install in bin/  (download by install.sh)
@@ -7,8 +8,8 @@
 #   "tool"            - bare name; looked up in PATH at runtime
 #   "user@host:/path" - remote SSH path; the pipeline wraps the call with ssh
 #
-# Note: config/tools.yml is gitignored (machine-specific). Commit
-#       config/tools.example.yml instead.
+# Note: the generated config/tools.yml is gitignored (machine-specific);
+#       only this template under config/defaults/ is committed.
 
 cutadapt:
   path: null

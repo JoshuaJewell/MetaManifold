@@ -3,7 +3,7 @@
     @testset "stage_sections" begin
         @test Config.stage_sections(:cutadapt) == "seed,subsample_n,cutadapt"
         @test Config.stage_sections(:dada2_filter_trim) == "dada2.file_patterns,dada2.filter_trim"
-        @test Config.stage_sections(:merge_taxa) == "merge_taxa,vsearch.enabled,swarm.enabled,dada2.taxonomy.enabled"
+        @test Config.stage_sections(:merge_taxa) == "merge_taxa,tagging,vsearch.enabled,swarm.enabled,dada2.taxonomy.enabled"
         @test_throws ErrorException Config.stage_sections(:nonexistent_stage)
     end
 

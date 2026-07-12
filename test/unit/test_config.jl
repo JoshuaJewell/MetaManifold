@@ -34,13 +34,28 @@
         @test cfg["dada2"]["verbose"]       == true  # inherited
     end
 
-    @testset "default analysis contamination flag" begin
+    @testset "default analysis exclude_categories" begin
         defaults_path = joinpath(@__DIR__, "..", "..", "config", "defaults", "pipeline.yml")
         defaults = YAML.load_file(defaults_path)
         @test haskey(defaults, "annotation")
-        @test defaults["annotation"]["max_rank"] == "species"
+        @test defaults["annotation"]["max_rank"] == "genus"
         @test haskey(defaults, "analysis")
-        @test defaults["analysis"]["include_contamination"] == false
+        @test haskey(defaults["analysis"], "exclude_categories")
+        excl = defaults["analysis"]["exclude_categories"]
+        @test length(excl) == 1
+        @test excl[1]["set"] == "contamination"
+        @test excl[1]["category"] == "Contaminant"
+        # Composition is intentionally left out so its chart shows the full make-up.
+        @test excl[1]["apply_to"] == ["diversity", "taxa", "venn"]
+        @test !("composition" in excl[1]["apply_to"])
+    end
+
+    @testset "tagging config defaults" begin
+        cfg = MetaManifold.Config.load_merged_config([joinpath(@__DIR__, "..", "..", "config", "defaults", "pipeline.yml")])
+        @test haskey(cfg, "tagging")
+        @test cfg["tagging"]["source"] == "VSEARCH"
+        @test cfg["tagging"]["max_x"] == -1
+        @test cfg["tagging"]["category_sets"] == ["default"]
     end
 
 end

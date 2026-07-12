@@ -1,0 +1,8 @@
+name: "Contamination"
+description: "Whitelist contamination model. Only the target eukaryote genera are Retained; every other row, whether classified as something else or left unclassified, falls into the catch-all Contaminant bucket and can be dropped from figures via analysis.exclude_categories: [{set: contamination, category: Contaminant}]. Curate config/filters/eukaryome_whitelist.yml to change the whitelist. Contaminant carries no filter: it is the catch-all for everything the whitelist does not retain."
+categories:
+  - name: "Retained"
+    colour: "#2e7d32"
+    filter: "eukaryome_whitelist.yml"
+  - name: "Contaminant"
+    colour: "#c0392b"

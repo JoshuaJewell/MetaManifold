@@ -36,9 +36,21 @@ export const STAGE_CONFIG_PREFIXES: Record<ConfigSection, string[]> = {
   dada2_classify: ['dada2.taxonomy.', 'dada2.output.'],
   swarm:          ['swarm.'],
   vsearch:        ['vsearch.'],
-  annotation:     ['annotation.max_rank', 'annotation.contamination.'],
-  analysis:       ['analysis.include_contamination', 'analysis.normalisation', 'analysis.normalisation_depth', 'analysis.alpha.', 'analysis.nmds.', 'analysis.taxa_bar.'],
+  annotation:     ['annotation.max_rank'],
+  analysis:       ['analysis.normalisation', 'analysis.normalisation_depth', 'analysis.alpha.', 'analysis.taxa_bar.'],
 }
+
+//## Config keys the pipeline no longer reads but which may still linger in a
+//## resolved config (for instance the SWARM compatibility pins kept in the local
+//## global config to preserve stage hashes). They are hidden from the editor so
+//## no dead knob is offered.
+export const HIDDEN_CONFIG_KEYS = new Set<string>([
+  'swarm.chimera_check',
+  'swarm.min_abundance',
+  'swarm.fastq_minovlen',
+  'swarm.identity',
+  'dada2.filter_trim.max_n',
+])
 
 const STAGE_ORDER = [...VISIBLE_STAGES]
 
@@ -62,7 +74,6 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'dada2.filter_trim.trunc_len':  '[forward, reverse] truncation lengths; first value used for single-end.',
   'dada2.filter_trim.max_ee':     '[forward, reverse] max expected errors. Reads exceeding this are discarded.',
   'dada2.filter_trim.min_len':    'Discard reads shorter than this after truncation.',
-  'dada2.filter_trim.max_n':      'Max number of ambiguous (N) bases allowed; 0 = none.',
   'dada2.filter_trim.match_ids':  'Require forward/reverse read IDs to match.',
   'dada2.filter_trim.rm_phix':    'Remove reads matching the PhiX genome.',
   'dada2.dada.nbases':            'Number of bases used for error model learning.',
@@ -100,16 +111,11 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'swarm.enabled':                'Set to false to skip OTU clustering entirely.',
   'swarm.differences':            'Max differences between sequences in the same cluster (-d).',
   'swarm.threads':                'Worker threads; 0 = all available (-t).',
-  'swarm.chimera_check':          'Run vsearch --uchime_denovo before clustering.',
-  'swarm.min_abundance':          'Discard singleton dereps before clustering (--minsize).',
-  'swarm.fastq_minovlen':         'Min overlap for paired-end merging (--fastq_minovlen).',
-  'swarm.identity':               'Threshold for mapping reads back to OTU seeds (--id).',
   'swarm.optional_args':          'Additional flags passed verbatim to swarm.',
   'analysis.taxa_bar.top_n':      'Collapse taxa below this rank count to "Other".',
   'analysis.taxa_bar.rank':       'Taxonomic rank for bar plots; null = lowest assigned rank.',
   'analysis.taxa_bar.ranks':      'Rank levels to plot; null = auto (last 3 levels).',
   'analysis.taxa_bar.report_ranks':'Ranks to include in the report; null = auto (last 3 levels).',
-'analysis.include_contamination': 'Include rows marked as contamination in analysis outputs. When false, only annotation rows tagged "no" in Contamination are used.',
   'analysis.normalisation':       'Depth normalisation method applied before diversity and ordination analyses. rarefy randomly subsamples each sample to a common depth; none disables normalisation entirely.',
   'analysis.normalisation_depth': 'Target library size for normalisation. Set to 0 to automatically use the minimum observed library size across the samples being analysed. Set a positive integer to use a fixed depth; samples with fewer reads than this value will be excluded from the analysis.',
   'analysis.alpha.show_points':   'Show individual samples overlaid on alpha comparison boxplots.',
@@ -117,21 +123,7 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
   'analysis.alpha.pairwise_brackets': 'Run BH-adjusted pairwise Wilcoxon rank-sum tests between every group pair and draw brackets, including n.s. results.',
   'analysis.alpha.paired_samples': 'Use paired-sample tests by matching sample IDs across groups. Uses paired Wilcoxon for 2 groups and Friedman for 3+ groups.',
   'analysis.alpha.significance_test': 'Overall significance test used for alpha comparison annotations.',
-  'analysis.nmds.distance':       'Distance metric for NMDS ordination.',
-  'analysis.nmds.max_stress':     'Warn if NMDS stress exceeds this value.',
-  'annotation.max_rank':          'Finest taxonomy rank used during FuncDB annotation. Finer ranks are ignored and removed from generated annotation tables.',
-  'annotation.contamination.min_consensus_rank':  'Only apply contamination filter when VSEARCH/DADA2 consensus is at this rank or finer. Empty = no rank gate.',
-  'annotation.contamination.min_consensus_score': 'Only apply contamination filter when consensus_score is at or above this value (0-1). 0 = no score gate.',
-  'annotation.contamination.blacklist.function':            'One entry per line. Rows whose function column matches an entry are marked as contamination.',
-  'annotation.contamination.blacklist.detailed_function':   'One entry per line. Rows whose detailed_function column matches an entry are marked as contamination.',
-  'annotation.contamination.blacklist.associated_organism': 'One entry per line. Rows whose assoc_organism column matches are marked as contamination.',
-  'annotation.contamination.blacklist.associated_material': 'One entry per line. Rows whose assoc_material column matches are marked as contamination.',
-  'annotation.contamination.blacklist.environment':         'One entry per line. Rows whose environment column matches are marked as contamination.',
-  'annotation.contamination.whitelist.function':            'One entry per line. Rows whose function column matches an entry are marked as non-contamination.',
-  'annotation.contamination.whitelist.detailed_function':   'One entry per line. Rows whose detailed_function column matches an entry are marked as non-contamination.',
-  'annotation.contamination.whitelist.associated_organism': 'One entry per line. Rows whose assoc_organism column matches are marked as non-contamination.',
-  'annotation.contamination.whitelist.associated_material': 'One entry per line. Rows whose assoc_material column matches are marked as non-contamination.',
-  'annotation.contamination.whitelist.environment':         'One entry per line. Rows whose environment column matches are marked as non-contamination.',
+  'annotation.max_rank':          'Finest taxonomy rank offered for manual contamination labelling and the rank charts. Finer ranks are ignored and removed from generated tables.',
 }
 
 export type ConfigType =
@@ -157,7 +149,6 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'dada2.file_patterns.mode':     { kind: 'enum', options: ['paired', 'forward', 'reverse'] },
   'dada2.filter_trim.trunc_q':    { kind: 'int' },
   'dada2.filter_trim.min_len':    { kind: 'int' },
-  'dada2.filter_trim.max_n':      { kind: 'int' },
   'dada2.filter_trim.match_ids':  { kind: 'boolean' },
   'dada2.filter_trim.rm_phix':    { kind: 'boolean' },
   'dada2.dada.nbases':            { kind: 'int' },
@@ -185,25 +176,8 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'swarm.enabled':                { kind: 'boolean' },
   'swarm.differences':            { kind: 'int' },
   'swarm.threads':                { kind: 'int' },
-  'swarm.chimera_check':          { kind: 'boolean' },
-  'swarm.min_abundance':          { kind: 'int' },
-  'swarm.fastq_minovlen':         { kind: 'int' },
-  'swarm.identity':               { kind: 'float', min: 0, max: 1, step: 0.01 },
   'analysis.taxa_bar.top_n':      { kind: 'int' },
   'annotation.max_rank':          { kind: 'enum', options: ['species', 'genus', 'family', 'order', 'class', 'division', 'supergroup'] },
-  'annotation.contamination.min_consensus_rank':  { kind: 'enum', options: ['', 'species', 'genus', 'family', 'order', 'class', 'division', 'supergroup'] },
-  'annotation.contamination.min_consensus_score': { kind: 'float', min: 0, max: 1, step: 0.01, nullable: true },
-  'annotation.contamination.blacklist.function':            { kind: 'string_list' },
-  'annotation.contamination.blacklist.detailed_function':   { kind: 'string_list' },
-  'annotation.contamination.blacklist.associated_organism': { kind: 'string_list' },
-  'annotation.contamination.blacklist.associated_material': { kind: 'string_list' },
-  'annotation.contamination.blacklist.environment':         { kind: 'string_list' },
-  'annotation.contamination.whitelist.function':            { kind: 'string_list' },
-  'annotation.contamination.whitelist.detailed_function':   { kind: 'string_list' },
-  'annotation.contamination.whitelist.associated_organism': { kind: 'string_list' },
-  'annotation.contamination.whitelist.associated_material': { kind: 'string_list' },
-  'annotation.contamination.whitelist.environment':         { kind: 'string_list' },
-  'analysis.include_contamination': { kind: 'boolean' },
   'analysis.normalisation':       { kind: 'enum', options: ['none', 'rarefy'] },
   'analysis.normalisation_depth': { kind: 'int' },
   'analysis.alpha.show_points':   { kind: 'boolean' },
@@ -211,8 +185,6 @@ export const CONFIG_TYPES: Record<string, ConfigType> = {
   'analysis.alpha.pairwise_brackets': { kind: 'boolean' },
   'analysis.alpha.paired_samples': { kind: 'boolean' },
   'analysis.alpha.significance_test': { kind: 'enum', options: ['kruskal_wallis'] },
-  'analysis.nmds.max_stress':     { kind: 'float', min: 0, max: 1, step: 0.01 },
-  'analysis.nmds.distance':       { kind: 'enum', options: ['bray_curtis'] },
 }
 
 
@@ -325,7 +297,7 @@ export function StageConfig({ configMap, prefixes, study, run, group, onConfigCh
   for (const prefix of prefixes) {
     const isSectionPrefix = prefix.endsWith('.')
     const sectionEntries = Object.entries(configMap)
-      .filter(([k]) => isSectionPrefix ? k.startsWith(prefix) : k === prefix)
+      .filter(([k]) => !HIDDEN_CONFIG_KEYS.has(k) && (isSectionPrefix ? k.startsWith(prefix) : k === prefix))
       .map(([k, { value, source }]) => ({
         dottedKey: k,
         leafKey: isSectionPrefix ? k.slice(prefix.length) : k,

@@ -99,9 +99,45 @@ export function filterAlphaFigure(
   return { data, layout }
 }
 
-/** Stateful alpha-metric selection: holds the selected set, keeps at least one
- *  metric active, and returns the figure filtered to that selection. */
-export function useAlphaMetricFilter(figure: unknown) {
+/** Map each metric to the source figure's y-axis layout key. */
+const METRIC_SRC_YLAYOUT: Record<AlphaMetric, string> = {
+  richness: 'yaxis',
+  shannon:  'yaxis2',
+  simpson:  'yaxis3',
+}
+
+/** Read a Plotly title's text, tolerating both the bare-string and {text} forms. */
+function titleText(t: unknown): string | undefined {
+  if (typeof t === 'string') return t
+  if (t && typeof t === 'object' && typeof (t as { text?: unknown }).text === 'string') {
+    return (t as { text: string }).text
+  }
+  return undefined
+}
+
+/** Isolate a single alpha metric as a standalone single-panel figure, titled by
+ *  that metric. Each pane then carries its own single axis, so the cosmetics
+ *  editor styles it without any subplot selectors. */
+export function extractAlphaPanel(figure: unknown, metric: AlphaMetric): unknown {
+  if (!figure || typeof figure !== 'object') return figure
+  const raw = figure as PlotlyFigure
+  if (!raw.data || !raw.layout) return figure
+  // Recover the metric's full name from its source y-axis title before filtering.
+  const srcAxis = raw.layout[METRIC_SRC_YLAYOUT[metric]] as { title?: unknown } | undefined
+  const name = (srcAxis && titleText(srcAxis.title)) ?? METRIC_LABELS[metric]
+  const single = filterAlphaFigure(figure, new Set<AlphaMetric>([metric])) as PlotlyFigure
+  const layout: Record<string, unknown> = { ...single.layout, title: { text: name } }
+  // The chart title now carries the metric name; clear the redundant y-axis title.
+  const yaxis = layout['yaxis']
+  if (yaxis && typeof yaxis === 'object') {
+    layout['yaxis'] = { ...(yaxis as Record<string, unknown>), title: { text: '' } }
+  }
+  return { data: single.data, layout }
+}
+
+/** Stateful alpha-metric selection: holds the selected set and keeps at least
+ *  one metric active. */
+export function useAlphaMetricSelection() {
   const [metrics, setMetrics] = useState<Set<AlphaMetric>>(() => new Set(ALPHA_METRICS))
 
   const toggle = (m: AlphaMetric) =>
@@ -111,6 +147,14 @@ export function useAlphaMetricFilter(figure: unknown) {
       else next.add(m)
       return next
     })
+
+  return { metrics, toggle }
+}
+
+/** As useAlphaMetricSelection, additionally returning the figure filtered to the
+ *  current selection. */
+export function useAlphaMetricFilter(figure: unknown) {
+  const { metrics, toggle } = useAlphaMetricSelection()
 
   const filtered = useMemo(
     () => filterAlphaFigure(figure, metrics),

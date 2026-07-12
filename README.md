@@ -68,7 +68,7 @@ Counts may be normalised before analysis (none, rarefaction to a fixed or auto-r
 - **R** >= 4.0 (required for the DADA2 stage and NMDS/PERMANOVA analysis)
   - Ubuntu/Debian: `sudo apt install r-base`
   - macOS: `brew install r` or [CRAN package](https://cran.r-project.org/bin/macosx/)
-- **bun** or **Node.js** for building the frontend (bun preferred)
+- **bun** or **Node.js** for building the frontend (bun preferred); `bun install` in `frontend/` pulls all JS dependencies, including `react-chart-editor` and `react-plotly.js`. The chart editor is fed `plotly.js-dist-min` rather than full `plotly.js` to keep the bundle size manageable.
 
 ## Installation
 
@@ -407,7 +407,10 @@ Controls the defaults applied to the analysis charts (alpha diversity, taxa bar,
 
 ```yaml
 analysis:
-  include_contamination: false   # include taxa flagged as contamination in analyses
+  exclude_categories:            # composition categories to drop from figures; [] to keep all
+    - {set: contamination, category: Contaminant, apply_to: [diversity, taxa, venn]}
+                                 # apply_to surfaces: diversity | taxa | composition | venn
+                                 # (omit apply_to to act on every surface)
   normalisation: none            # none | rarefaction | rss (relative sum scaling)
   normalisation_depth: 0         # rarefaction depth; 0 = auto (min positive library size)
   alpha:

@@ -10,6 +10,22 @@ using JSON3, RCall
 
 const _r_lock = ReentrantLock()
 
+## Tagging helpers
+
+# Build the tagging dict passed to `load_results_db` from the run config and the
+# project's config directory. Returns `nothing` when the tagging block is absent.
+function _tagging_cfg(project, run_cfg::Dict)
+    tag = get(run_cfg, "tagging", nothing)
+    isnothing(tag) && return nothing
+    Dict(
+        "source"           => string(get(tag, "source", "VSEARCH")),
+        "max_x"            => Int(get(tag, "max_x", -1)),
+        "category_sets"    => Vector{String}(get(tag, "category_sets", String[])),
+        "compositions_dir" => joinpath(project.config_dir, "compositions"),
+        "filters_dir"      => joinpath(project.config_dir, "filters"),
+    )
+end
+
 ## Stage execution helpers
 function _with_r_lock(action::Function, run_label::String, steps::AbstractVector{<:AbstractString}=String[];
                       reset_workspace::Bool=true)
@@ -95,7 +111,8 @@ function _run_full_pipeline(study::String, run::String, db_config::String,
     # Load results into DuckDB
     swarm_dir = joinpath(project.dir, "swarm")
     load_results_db(joinpath(project.dir, "merged");
-                    swarm_dir = isdir(swarm_dir) ? swarm_dir : nothing)
+                    swarm_dir = isdir(swarm_dir) ? swarm_dir : nothing,
+                    tagging   = _tagging_cfg(project, run_cfg))
 
     GC.gc(false)
     merged
@@ -235,7 +252,8 @@ function _run_merge_taxa(project, asvs, otus, db_meta)
 
     swarm_dir = joinpath(run_dir, "swarm")
     load_results_db(joinpath(run_dir, "merged");
-                    swarm_dir = isdir(swarm_dir) ? swarm_dir : nothing)
+                    swarm_dir = isdir(swarm_dir) ? swarm_dir : nothing,
+                    tagging   = _tagging_cfg(project, run_cfg))
     asv_merged
 end
 

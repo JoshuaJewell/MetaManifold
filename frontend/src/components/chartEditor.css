@@ -1,0 +1,9 @@
+/* The app's global reset (*, *::before, *::after { margin:0; padding:0;
+   box-sizing:border-box }) collapses react-chart-editor's fold headers; restore
+   a sane height, scoped to the editor subtree only. */
+.plotly-editor--theme-provider .fold__top {
+  min-height: 30px;
+  align-items: center;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}

@@ -104,6 +104,25 @@
         @test length(legend_traces) == 2
     end
 
+    @testset "bar_chart modes and colour_for" begin
+        fig = Analysis.bar_chart(["A", "B"], ["s1", "s2"],
+            Float64[1 2; 3 4]; mode="group", relative=false,
+            colour_for = l -> l == "A" ? "#111111" : "#222222")
+        @test fig["layout"]["barmode"] == "group"
+        # Traces are ordered by total descending: B(7) first, A(3) second.
+        # Find the trace named "A" and check its colour.
+        trace_a = first(filter(t -> t["name"] == "A", fig["data"]))
+        @test trace_a["marker"]["color"] == "#111111"
+        # Grouped absolute mode must not fix the y-axis range to [0, 1].
+        @test !haskey(fig["layout"]["yaxis"], "range")
+
+        # Stacked relative mode keeps the [0, 1] range.
+        fig2 = Analysis.bar_chart(["A", "B"], ["s1", "s2"],
+            Float64[1 2; 3 4]; mode="stacked", relative=true)
+        @test fig2["layout"]["barmode"] == "stack"
+        @test fig2["layout"]["yaxis"]["range"] == [0, 1]
+    end
+
     @testset "pool_columns" begin
         counts = [10.0 20.0 30.0 40.0;
                    5.0 10.0 15.0 20.0]

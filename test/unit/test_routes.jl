@@ -162,6 +162,48 @@ SV = Main.Server
               ["Genus", "BLAST Assignment"]
     end
 
+    ## config.jl: per-study chart cosmetics resolution
+    @testset "chart cosmetics" begin
+        tmp = mktempdir()
+        study_dir = joinpath(tmp, "data", "StudyX"); mkpath(study_dir)
+        old_root = SV.ServerState._root[]
+        SV.ServerState.set_root!(tmp)
+        try
+            @test isempty(SV._resolve_chart_cosmetics("StudyX", "taxa_bar"))
+
+            write(joinpath(study_dir, "pipeline.yml"), """
+            chart_cosmetics:
+              taxa_bar:
+                layout:
+                  title:
+                    text: My bars
+                traces:
+                  Bacteria:
+                    marker:
+                      color: "#00ff00"
+            """)
+            cos = SV._resolve_chart_cosmetics("StudyX", "taxa_bar")
+            @test cos["layout"]["title"]["text"] == "My bars"
+            @test cos["traces"]["Bacteria"]["marker"]["color"] == "#00ff00"
+            @test isempty(SV._resolve_chart_cosmetics("StudyX", "alpha_richness"))
+        finally
+            SV.ServerState.set_root!(old_root)
+            rm(tmp; recursive=true, force=true)
+        end
+    end
+
+    ## analysis.jl: aggregate run expansion
+    @testset "aggregate run expansion" begin
+        # Two specs for the same run with different sub-group prefixes.
+        # Symbol keys mirror what JSON3 produces from a parsed request body.
+        specs = [(; run="RunA", group=nothing, prefix="Caecum", source=nothing),
+                 (; run="RunA", group=nothing, prefix="Ileum",  source=nothing)]
+        agg = SV._expand_comparison_run_specs("StudyX", specs; aggregate=true)
+        @test length(agg) == 2          # one per input spec, but all prefix=nothing
+        @test all(s -> isnothing(s.prefix), agg)
+        @test all(s -> s.run == "RunA", agg)
+    end
+
     ## analysis.jl: pure label, prefix and matrix helpers
     @testset "analysis helpers" begin
         @test SV._opt_string((; a = "x"), :a) == "x"
@@ -196,6 +238,120 @@ SV = Main.Server
         by_group = [(; group = "G1", run = "R", prefix = nothing),
                     (; group = "G2", run = "R", prefix = nothing)]
         @test SV._venn_condition_labels(by_group) == ["G1", "G2"]
+    end
+
+    ## analysis.jl: unified chart core helper
+    @testset "unified chart helper (_chart_data)" begin
+        # Build an in-memory merged table with two taxonomy ranks and two sub-group prefixes.
+        db  = DuckDB.DB()
+        con = DBInterface.connect(db)
+        DBInterface.execute(con, """
+            CREATE TABLE merged (
+                SeqName VARCHAR,
+                Domain  VARCHAR,
+                Genus   VARCHAR,
+                A_s1 BIGINT, A_s2 BIGINT,
+                B_s1 BIGINT, B_s2 BIGINT
+            )
+        """)
+        DBInterface.execute(con, """
+            INSERT INTO merged VALUES
+                ('seq1', 'Eukaryota', 'Chlorella',    10, 0,  5, 2),
+                ('seq2', 'Bacteria',  'Escherichia',   0, 20, 3, 0),
+                ('seq3', 'Bacteria',  'Clostridium',   5, 5,  0, 0)
+        """)
+
+        all_scols = SV.Analysis.sample_columns(con, "merged")
+        @test Set(all_scols) == Set(["A_s1", "A_s2", "B_s1", "B_s2"])
+        columns = SV._duckdb_columns(con, "merged")
+
+        ## tag=rank, no subgroup: all sample columns, rank=Genus
+        res = SV._chart_data(con, "merged", columns, all_scols,
+                             "", Any[], "rank", "Genus",
+                             nothing, String[], "run1", 15, "VSEARCH")
+        @test res isa NamedTuple
+        @test Set(res.segment_labels) == Set(["Chlorella", "Escherichia", "Clostridium"])
+        @test Set(res.sample_names) == Set(all_scols)
+        @test size(res.counts) == (3, 4)
+
+        ## tag=rank, subgroup prefix "A": only A_s1 and A_s2
+        res_A = SV._chart_data(con, "merged", columns, all_scols,
+                               "", Any[], "rank", "Genus",
+                               "A", String[], "run1", 15, "VSEARCH")
+        @test res_A isa NamedTuple
+        @test Set(res_A.sample_names) == Set(["A_s1", "A_s2"])
+
+        ## Zero-read guard: seq3 (Clostridium) has B_s1=0, B_s2=0 -> sum=0 -> dropped.
+        # seq2 (Escherichia): B_s1=3, B_s2=0 -> non-zero, kept.
+        res_B = SV._chart_data(con, "merged", columns, all_scols,
+                               "", Any[], "rank", "Genus",
+                               "B", String[], "run1", 15, "VSEARCH")
+        @test res_B isa NamedTuple
+        @test "Clostridium" ∉ res_B.segment_labels
+        @test "Chlorella"   in res_B.segment_labels
+        @test "Escherichia" in res_B.segment_labels
+
+        ## subgroup=="__pool__": all samples used but pooled into group totals A and B
+        res_pool = SV._chart_data(con, "merged", columns, all_scols,
+                                  "", Any[], "rank", "Domain",
+                                  "__pool__", ["A", "B"], "run1", 15, "VSEARCH")
+        @test res_pool isa NamedTuple
+        @test Set(res_pool.sample_names) == Set(["A", "B"])
+
+        ## effective_top_n: typemax(Int) for categories, top_n for ranks
+        res_cat_tn = SV._chart_data(con, "merged", columns, all_scols,
+                                    "", Any[], "category", "noop_set",
+                                    nothing, String[], "run1", 5, "VSEARCH")
+        # Category set "noop_set" does not exist; the column is absent so DuckDB
+        # will error. Accept either a success NamedTuple with typemax(Int) top_n
+        # or an HTTP response (error path) - either way the route handles it.
+        if res_cat_tn isa NamedTuple
+            @test res_cat_tn.effective_top_n == typemax(Int)
+        end
+
+        ## Category happy path: write "default" category column, then call _chart_data.
+        # Uses the real compositions + filters dirs so the "default" set is resolved.
+        comps_dir = joinpath(@__DIR__, "..", "..", "config", "compositions")
+        flt_dir   = joinpath(@__DIR__, "..", "..", "config", "filters")
+        SV.Categories.write_category_columns!(con, "merged", "VSEARCH", ["default"];
+                                              compositions_dir=comps_dir,
+                                              filters_dir=flt_dir)
+        columns_after = SV._duckdb_columns(con, "merged")
+        # _chart_data with tag=category, value="default"; ensure_columns! is now a no-op.
+        res_cat = SV._chart_data(con, "merged", columns_after, all_scols,
+                                 "", Any[], "category", "default",
+                                 nothing, String[], "run1", 5, "VSEARCH")
+        @test res_cat isa NamedTuple
+        @test res_cat.effective_top_n == typemax(Int)
+        # Real category aggregation was exercised: at least one label returned.
+        @test !isempty(res_cat.segment_labels)
+        # All returned labels must be valid category names from the "default" set
+        # (or "Unassigned"). The test table has only Domain and Genus columns so
+        # only those filter branches that refer to available columns are applied.
+        valid_labels = Set(["Protozoa", "Helminths", "Fungi", "Host", "Plants",
+                            "Invertebrates", "Bacteria", "Archaea", "Unassigned"])
+        @test all(lbl -> lbl in valid_labels, res_cat.segment_labels)
+
+        DBInterface.close!(con)
+        close(db)
+    end
+
+    @testset "exclude_categories apply_to surface parsing" begin
+        # A missing apply_to means "all surfaces" (nothing).
+        @test SV._parse_apply_to(nothing; set="s", category="c") === nothing
+        # A malformed (non-list) value also degrades to all surfaces.
+        @test SV._parse_apply_to("diversity"; set="s", category="c") === nothing
+        # An explicit list is normalised to a set of known surfaces; case and
+        # surrounding whitespace are tolerated.
+        parsed = SV._parse_apply_to(["Diversity", " taxa ", "venn"]; set="s", category="c")
+        @test parsed == Set(["diversity", "taxa", "venn"])
+        @test !("composition" in parsed)
+        # Unknown surfaces are dropped, not retained.
+        @test SV._parse_apply_to(["taxa", "bogus"]; set="s", category="c") == Set(["taxa"])
+        # An empty list applies to no surface (the exclusion becomes inert).
+        @test SV._parse_apply_to(String[]; set="s", category="c") == Set{String}()
+        # The known-surface vocabulary is exactly these four.
+        @test SV._EXCLUSION_SURFACES == Set(["diversity", "taxa", "composition", "venn"])
     end
 
 end

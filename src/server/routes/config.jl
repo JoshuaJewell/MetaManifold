@@ -12,6 +12,11 @@ function _load_yml(path::String)
     isfile(path) ? something(YAML.load_file(path), Dict()) : Dict()
 end
 
+## Recursively convert JSON3 values into plain Dict/Vector/scalars for YAML.write.
+_to_plain(x::JSON3.Object) = Dict{String,Any}(string(k) => _to_plain(v) for (k, v) in x)
+_to_plain(x::JSON3.Array)  = Any[_to_plain(v) for v in x]
+_to_plain(x) = x
+
 function _flatten(d::Dict, prefix::String="")
     out = Dict{String,Any}()
     for (k, v) in d
@@ -63,6 +68,55 @@ function _resolve_config(study::String, run::Union{String,Nothing}=nothing,
             (; value=default_cfg[k], source="default")
         end
     end for k in all_keys)
+end
+
+## Per-study chart cosmetics (layout + name-keyed trace style), in pipeline.yml.
+const _CHART_TYPES = Set(["taxa_bar", "alpha_richness", "alpha_shannon", "alpha_simpson",
+                          "nmds", "composition_comparison", "pipeline_stats"])
+
+function _resolve_chart_cosmetics(study::String, chart_type::String)
+    cfg = _load_yml(joinpath(ServerState.data_dir(), study, "pipeline.yml"))
+    all = get(cfg, "chart_cosmetics", nothing)
+    all isa Dict || return Dict{String,Any}()
+    entry = get(all, chart_type, nothing)
+    entry isa Dict ? entry : Dict{String,Any}()
+end
+
+@get "/api/v1/studies/{study}/chart-cosmetics" function(req, study::String)
+    study in _study_names() || return json_error(404, "study_not_found", "Study '$study' not found")
+    cosmetics = get(_load_yml(joinpath(ServerState.data_dir(), study, "pipeline.yml")), "chart_cosmetics", Dict())
+    json(cosmetics isa Dict ? cosmetics : Dict())
+end
+
+@patch "/api/v1/studies/{study}/chart-cosmetics" function(req, study::String)
+    study in _study_names() || return json_error(404, "study_not_found", "Study '$study' not found")
+    body = JSON3.read(String(req.body))
+    chart_type = string(get(body, :chart_type, ""))
+    chart_type in _CHART_TYPES || return json_error(400, "invalid_chart_type",
+        "Unknown chart type '$chart_type'")
+    clear = Bool(get(body, :clear, false))
+    layout = get(body, :layout, nothing)
+    traces = get(body, :traces, nothing)
+    path = joinpath(ServerState.data_dir(), study, "pipeline.yml")
+    lock(_config_file_lock) do
+        cfg = _load_yml(path)
+        cosmetics = get(cfg, "chart_cosmetics", nothing)
+        cosmetics = cosmetics isa Dict ? cosmetics : Dict{Any,Any}()
+        if clear
+            delete!(cosmetics, chart_type)
+        else
+            entry = Dict{String,Any}()
+            isnothing(layout) || (entry["layout"] = _to_plain(layout))
+            isnothing(traces) || (entry["traces"] = _to_plain(traces))
+            cosmetics[chart_type] = entry
+        end
+        isempty(cosmetics) ? delete!(cfg, "chart_cosmetics") : (cfg["chart_cosmetics"] = cosmetics)
+        tmp = path * ".tmp"
+        open(tmp, "w") do io; YAML.write(io, cfg) end
+        mv(tmp, path; force=true)
+    end
+    cosmetics2 = get(_load_yml(path), "chart_cosmetics", Dict())
+    json(cosmetics2 isa Dict ? cosmetics2 : Dict())
 end
 
 ## Allowed config keys - derived from defaults/pipeline.yml at load time.

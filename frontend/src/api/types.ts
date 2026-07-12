@@ -162,19 +162,19 @@ export interface AnalysisRequest {
   prefix?: string | null
 }
 
-export interface TaxaBarRequest extends AnalysisRequest {
-  rank?: string
-  top_n?: number
-  relative?: boolean
-  pool?: boolean
-  pool_groups?: string[]
+export interface ChartRequest {
+  table:        string
+  tag:          'rank' | 'category'
+  value:        string
+  relative?:    boolean
+  mode?:        'stacked' | 'grouped'
+  subgroup?:    string | null
+  top_n?:       number
+  colFilters?:  Record<string, ColFilter>
 }
 
-export interface CrossRunTaxaBarRequest extends AnalysisRequest {
+export interface CrossRunChartRequest extends ChartRequest {
   runs: ComparisonRunSpec[]
-  rank?: string
-  top_n?: number
-  relative?: boolean
 }
 
 export interface ComparisonRunSpec {
@@ -198,6 +198,7 @@ export function expandRunSpecs(
 
 export interface ComparisonRequest extends AnalysisRequest {
   runs: ComparisonRunSpec[]
+  aggregate?: boolean
 }
 
 export interface PermanovaResult {
@@ -229,10 +230,11 @@ export interface CategoryInfo {
 }
 
 export interface CategorySet {
-  name:        string
-  label:       string
-  description: string
-  categories:  CategoryInfo[]
+  name:               string
+  label:              string
+  description:        string
+  categories:         CategoryInfo[]
+  unassigned_colour?: string
 }
 
 export interface CompositionCategoryStats {
@@ -272,4 +274,26 @@ export interface VennRequest {
   table: string
   rank: string
   source?: AnnotationSource
+}
+
+export interface CategorySetSaveRequest {
+  base:         string
+  colours:      Record<string, string>
+  label?:       string
+  description?: string
+}
+
+export interface CompositionSummaryRequest {
+  category_set: string
+  subgroup?:    string | null
+}
+
+export interface ChartCosmetics {
+  layout?: Record<string, unknown>
+  traces?: Record<string, Record<string, unknown>>
+}
+export type ChartCosmeticsMap = Record<string, ChartCosmetics>
+export interface ChartCosmeticsPatch extends ChartCosmetics {
+  chart_type: string
+  clear?: boolean
 }

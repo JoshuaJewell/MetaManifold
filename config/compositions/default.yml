@@ -1,38 +1,27 @@
-# Default organism composition categories for gut eukaryome studies.
-# Categories are evaluated in priority order (first match wins).
-# Each category references a filter preset from config/filters/.
-name: Default Composition
-description: Standard organism categories for gut metagenomics
-
+name: "Default Composition"
+description: "Standard organism categories for gut metagenomics"
 categories:
-  - name: Protozoa
+  - name: "Protozoa"
     colour: "#3498db"
-    filter: protist.pr2.yml
-
-  - name: Helminths
+    filter: "protist.pr2.yml"
+  - name: "Helminths"
     colour: "#800020"
-    filter: helminths.pr2.yml
-
-  - name: Fungi
+    filter: "helminths.pr2.yml"
+  - name: "Fungi"
     colour: "#f1c40f"
-    filter: fungi.pr2.yml
-
-  - name: Host
+    filter: "fungi.pr2.yml"
+  - name: "Host"
     colour: "#e74c3c"
-    filter: vertebrates.pr2.yml
-
-  - name: Plants
+    filter: "vertebrates.pr2.yml"
+  - name: "Plants"
     colour: "#2e7d32"
-    filter: plants.pr2.yml
-
-  - name: Invertebrates
+    filter: "plants.pr2.yml"
+  - name: "Invertebrates"
     colour: "#81c784"
-    filter: invertebrates.pr2.yml
-
-  - name: Bacteria
+    filter: "invertebrates.pr2.yml"
+  - name: "Bacteria"
     colour: "#8e44ad"
-    filter: bacteria.pr2.yml
-
-  - name: Archaea
+    filter: "bacteria.pr2.yml"
+  - name: "Archaea"
     colour: "#e67e22"
-    filter: archaea.pr2.yml
+    filter: "archaea.pr2.yml"

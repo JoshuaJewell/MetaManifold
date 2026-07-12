@@ -98,6 +98,17 @@ function _load_run_config(run_dir::String)::Union{Dict,Nothing}
     cfg isa Dict ? cfg : nothing
 end
 
+# Resolve the tagging source (the taxonomy side, VSEARCH or DADA2, read at merge
+# time for both rank and category labelling) from a run's run_config.yml, falling
+# back to `fallback` when the config is absent or the tagging block is missing.
+function _tagging_source(study::String, run::String;
+                         group::Union{String,Nothing}=nothing,
+                         fallback::String="VSEARCH")
+    cfg = _load_run_config(_run_project_dir(study, run; group))
+    isnothing(cfg) && return fallback
+    string(get(get(cfg, "tagging", Dict()), "source", fallback))
+end
+
 function _config_flag(cfg::Union{Dict,Nothing}, keys::Vector{String}, default::Bool)::Bool
     isnothing(cfg) && return default
     d = cfg

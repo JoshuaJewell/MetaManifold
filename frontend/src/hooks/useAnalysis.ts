@@ -24,17 +24,9 @@ type ColFilter = { include?: string[]; min?: number; max?: number }
 
 export interface UseAnalysisResult {
   ranks: string[]
-  rank: string | null
-  setRank: (rank: string | null) => void
-  relative: boolean
-  setRelative: (relative: boolean) => void
-  pool: boolean
-  setPool: (pool: boolean) => void
   alphaFig: unknown
-  taxaFig: unknown
   loading: boolean
   runAlpha: () => Promise<void>
-  runTaxaBar: () => Promise<void>
   resetFigures: () => void
 }
 
@@ -43,11 +35,7 @@ export function useAnalysis(opts: UseAnalysisOpts): UseAnalysisResult {
   const toast = useToast()
 
   const [ranks, setRanks]       = useState<string[]>([])
-  const [rank, setRank]         = useState<string | null>(null)
-  const [relative, setRelative] = useState(true)
-  const [pool, setPool]         = useState(false)
   const [alphaFig, setAlphaFig] = useState<unknown>(null)
-  const [taxaFig, setTaxaFig]   = useState<unknown>(null)
   const [loading, setLoading]   = useState(false)
 
   useEffect(() => {
@@ -59,11 +47,6 @@ export function useAnalysis(opts: UseAnalysisOpts): UseAnalysisResult {
       .then(setRanks)
       .catch(() => setRanks([]))
   }, [study, run, group, source, table, enabled])
-
-  useEffect(() => {
-    if (ranks.length === 0) { setRank(null); return }
-    if (!rank || !ranks.includes(rank)) setRank(ranks[ranks.length - 1])
-  }, [ranks, rank])
 
   const body = useMemo((): AnalysisRequest | null => {
     if (!table) return null
@@ -80,24 +63,9 @@ export function useAnalysis(opts: UseAnalysisOpts): UseAnalysisResult {
     } finally { setLoading(false) }
   }, [body, group, run, study, toast])
 
-  const runTaxaBar = useCallback(async () => {
-    if (!rank || !body) return
-    setLoading(true)
-    try {
-      const poolGroups = pool
-        ? (prefix ? [prefix] : (opts.subgroups ?? []))
-        : undefined
-      setTaxaFig(await api.analysis.taxaBar(study, run,
-        { ...body, rank, top_n: 15, relative, pool, pool_groups: poolGroups }, group))
-    } catch (err) {
-      toast.error('Taxa bar failed: ' + (errorMessage(err)))
-    } finally { setLoading(false) }
-  }, [body, group, rank, relative, pool, prefix, opts.subgroups, run, study, toast])
-
   const resetFigures = useCallback(() => {
     setAlphaFig(null)
-    setTaxaFig(null)
   }, [])
 
-  return { ranks, rank, setRank, relative, setRelative, pool, setPool, alphaFig, taxaFig, loading, runAlpha, runTaxaBar, resetFigures }
+  return { ranks, alphaFig, loading, runAlpha, resetFigures }
 }

@@ -67,6 +67,31 @@ seq3,100,200
     end
 end
 
+@testset "Tools - _expected_trimmed_count" begin
+    # Mirrors the primary-read pattern the cutadapt skip guard builds.
+    pat(suffix) = Regex(suffix * raw"[^/]*\.fastq\.gz$")
+
+    # Three paired samples: six raw files (R1 + R2 each).
+    all_entries = [
+        FastqEntry("/d/s1_R1.fastq.gz", "s1_R1.fastq.gz"),
+        FastqEntry("/d/s1_R2.fastq.gz", "s1_R2.fastq.gz"),
+        FastqEntry("/d/s2_R1.fastq.gz", "s2_R1.fastq.gz"),
+        FastqEntry("/d/s2_R2.fastq.gz", "s2_R2.fastq.gz"),
+        FastqEntry("/d/s3_R1.fastq.gz", "s3_R1.fastq.gz"),
+        FastqEntry("/d/s3_R2.fastq.gz", "s3_R2.fastq.gz"),
+    ]
+    r1_only = filter(e -> occursin(pat("_R1"), e.name), all_entries)
+
+    # No-subsample path: selection holds every raw file (R1 + R2). Paired mode
+    # writes two trimmed files per sample, so three samples -> six, NOT twelve.
+    @test Tools._expected_trimmed_count(all_entries, "paired", pat("_R1")) == 6
+    # Subsample path: selection is already primary-only. Same answer either way.
+    @test Tools._expected_trimmed_count(r1_only, "paired", pat("_R1")) == 6
+    # Single-end modes write one trimmed file per primary read.
+    @test Tools._expected_trimmed_count(all_entries, "forward", pat("_R1")) == 3
+    @test Tools._expected_trimmed_count(all_entries, "reverse", pat("_R2")) == 3
+end
+
 @testset "Tools - get_primer_args mode dispatch" begin
     # Write a self-contained primers fixture - avoids depending on gitignored config/primers.yml
     primers_path = joinpath(tempdir(), "test_primers_$(getpid()).yml")

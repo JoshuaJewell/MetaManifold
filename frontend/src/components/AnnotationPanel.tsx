@@ -306,8 +306,8 @@ export function AnnotationPanel({ study, run, group, subgroups }: { study: strin
   )
 
   const distinctFetcher = useCallback(
-    (column: string, activeFilters?: Record<string, ColFilter>) =>
-      api.annotations.distinct(study, run, source, selected!, column, activeFilters, group),
+    (column: string, activeFilters?: Record<string, ColFilter>, keywordFilter?: string) =>
+      api.annotations.distinct(study, run, source, selected!, column, activeFilters, group, keywordFilter),
     [group, run, selected, source, study],
   )
 
@@ -453,7 +453,7 @@ export function AnnotationPanel({ study, run, group, subgroups }: { study: strin
           {selected && showTable && (
             <>
               <DataTable
-                key={`${source}-${selected}`}
+                key={`ann:${study}/${run}/${group ?? ''}/${source}/${selected}`}
                 storageKey={`ann:${study}/${run}/${group ?? ''}/${source}/${selected}`}
                 refreshKey={blastAssignmentRefreshKey}
                 fetcher={fetcher}

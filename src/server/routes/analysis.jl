@@ -5,12 +5,13 @@
 
 using CSV, DataFrames
 
-using MetaManifold.Analysis: alpha_chart, taxa_bar_chart, pipeline_stats_chart,
+using MetaManifold.Analysis: alpha_chart, pipeline_stats_chart,
                              sample_columns, taxonomy_levels, taxon_column, filtered_counts,
                              aggregate_by_taxon, combined_counts_across_runs,
                              alpha_boxplot, nmds_chart, run_nmds, run_permanova, r_available,
                              sequence_column_name, normalise_counts, venn_taxa_present,
-                             pool_columns, auto_min_depth
+                             pool_columns, auto_min_depth, bar_chart
+using MetaManifold.Categories
 
 function _validate_run_request(study::String, run::String)
     study in _study_names() || return json_error(404, "study_not_found",
@@ -40,18 +41,17 @@ end
 
     body = JSON3.read(String(req.body))
     table = get(body, :table, "merged")
-    source = haskey(body, :source) ? string(get(body, :source)) : nothing
     params = _body_filter_params(body)
     cfg_cache = Dict{Tuple{String,String,String}, Any}()
-    include_contamination = _analysis_include_contamination(study; run, group, config_cache=cfg_cache)
     (norm_method, norm_depth) = _analysis_normalisation(study; run, group, config_cache=cfg_cache)
 
     prefix = let p = get(body, :prefix, nothing); isnothing(p) ? nothing : string(p) end
 
-    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, columns
+    _with_analysis_results_table(study, run, table; group) do con, columns
         scols = _filter_by_prefix(sample_columns(con, table), prefix)
         isempty(scols) && return json_error(400, "no_samples", "No sample columns found in table '$table'")
-        where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
+        exclude_conditions = _exclusion_conditions(study, run, group, columns; surface="diversity", config_cache=cfg_cache)
+        where_clause, where_params = _analysis_where_clause(params, columns; exclude_conditions)
         mat = filtered_counts(con, table, scols, where_clause, where_params)
         (; mat, kept) = normalise_counts(mat; method=norm_method, depth=norm_depth,
                                          seed=_study_seed(study))
@@ -73,65 +73,188 @@ end
     end
 end
 
-## Per-run taxa bar chart
-@post "/api/v1/studies/{study}/runs/{run}/analysis/taxa-bar" function(req,
-                                                                       study::String,
-                                                                       run::String)
+## Unified chart helpers
+
+# Resolve compositions dir without depending on composition.jl (loaded after this file).
+_chart_compositions_dir() =
+    joinpath(dirname(ServerState.projects_dir()), "config", "compositions")
+
+## Colour map for a category set: category name -> hex colour.
+# Falls back to _UNASSIGNED_COLOUR for "Unassigned" and "#95a5a6" for anything else.
+function _category_colour_for(set_name::String)
+    cfg = Categories.load_category_set(set_name;
+                                       compositions_dir=_chart_compositions_dir())
+    colour_map = Dict{String,String}()
+    if !isnothing(cfg)
+        for cat in get(cfg, "categories", [])
+            name = get(cat, "name", nothing)
+            col  = get(cat, "colour", nothing)
+            (!isnothing(name) && !isnothing(col)) && (colour_map[string(name)] = string(col))
+        end
+        unassigned_col = get(cfg, "unassigned_colour", "#95a5a6")
+        colour_map["Unassigned"] = string(unassigned_col)
+    end
+    lbl -> get(colour_map, lbl, "#95a5a6")
+end
+
+## Core chart-data helper (pure: no HTTP, testable directly).
+#
+# Resolves label column, applies scope/pooling, drops zero-read rows, and returns
+# (segment_labels, sample_names, counts_matrix) or an error dict.
+#
+# Parameters:
+#   con              - DuckDB connection (already open on the annotation table)
+#   table            - table name
+#   columns          - all column names present in the table
+#   all_scols        - all sample columns discovered for this run/table
+#   where_clause     - SQL WHERE fragment (may be "")
+#   where_params     - positional parameters for where_clause
+#   tag              - "rank" or "category"
+#   value            - rank name or category-set name
+#   subgroup         - nothing | a prefix string | "__pool__"
+#   pool_groups      - sub-group labels to pool into when subgroup == "__pool__"
+#   pool_fallback    - label used when pool_groups is empty (e.g. the run name)
+#   top_n            - top-N limit; ignored for categories (uses typemax(Int))
+#   source           - annotation source ("VSEARCH"|"DADA2"), for ensure_columns!
+function _chart_data(con, table::String, columns::Vector{String},
+                     all_scols::Vector{String},
+                     where_clause::String, where_params::Vector,
+                     tag::String, value::String,
+                     subgroup::Union{String,Nothing},
+                     pool_groups::Vector{String},
+                     pool_fallback::String,
+                     top_n::Int,
+                     source::String)
+    # Scope sample columns by subgroup.
+    scols = if isnothing(subgroup) || subgroup == "__pool__"
+        all_scols
+    else
+        _filter_by_prefix(all_scols, subgroup)
+    end
+    isempty(scols) && return json_error(400, "no_samples",
+                                        "No sample columns for the requested scope")
+
+    # Resolve label column.
+    label_col = if tag == "rank"
+        if isempty(value)
+            levels = taxonomy_levels(con, table)
+            isempty(levels) && return json_error(400, "no_taxonomy",
+                                                 "No taxonomy columns found")
+            col = taxon_column(columns, last(levels))
+            isnothing(col) && return json_error(400, "bad_rank",
+                                                "Unknown rank '$(last(levels))'")
+            col
+        else
+            col = taxon_column(columns, value)
+            isnothing(col) && return json_error(400, "bad_rank",
+                                                "Unknown rank '$value'")
+            col
+        end
+    else
+        # Ensure the Category__ column exists (lazy backfill for old runs).
+        Categories.ensure_columns!(con, table, source, [value];
+                                   compositions_dir=_chart_compositions_dir(),
+                                   filters_dir=_filters_dir())
+        col = Categories.column_name(value)
+        # Verify the column now exists; it may still be absent when the set
+        # config file does not exist (ensure_columns! skips missing sets).
+        present = Set(string.(DataFrame(DBInterface.execute(con,
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            [table])).column_name))
+        col in present || return json_error(404, "category_set_not_found",
+                                            "Category set '$value' not found")
+        col
+    end
+
+    # For categories, never collapse into "Other".
+    effective_top_n = (tag == "category") ? typemax(Int) : top_n
+
+    agg = aggregate_by_taxon(con, table, scols, label_col, where_clause, where_params)
+    nrow(agg) == 0 && return json_error(400, "no_data", "No data after filtering")
+
+    segment_labels = String.(agg.taxon)
+    counts = Matrix{Float64}(agg[:, scols])  # segments x samples
+
+    # Zero-read guard: drop label rows whose sum across retained samples is zero.
+    row_totals = vec(sum(counts, dims=2))
+    keep_rows  = row_totals .> 0
+    if !all(keep_rows)
+        segment_labels = segment_labels[keep_rows]
+        counts         = counts[keep_rows, :]
+    end
+    isempty(segment_labels) && return json_error(400, "no_data",
+                                                  "All labels have zero reads")
+
+    # Pool sample columns when requested.
+    if subgroup == "__pool__"
+        scols, counts = pool_columns(scols, counts, pool_groups;
+                                     fallback_label=pool_fallback)
+    end
+
+    (; segment_labels, sample_names=scols, counts, effective_top_n)
+end
+
+## Per-run unified chart
+@post "/api/v1/studies/{study}/runs/{run}/analysis/chart" function(req,
+                                                                    study::String,
+                                                                    run::String)
     group = _req_group(req)
     dir, err = _require_run_results(study, run; group)
     !isnothing(err) && return err
 
     body = JSON3.read(String(req.body))
-    table = get(body, :table, "merged")
-    source = haskey(body, :source) ? string(get(body, :source)) : nothing
-    rank = get(body, :rank, nothing)
-    top_n = get(body, :top_n, 15)
-    relative = get(body, :relative, true)
-    do_pool = Bool(get(body, :pool, false))
-    pool_groups = let v = get(body, :pool_groups, nothing)
-        isnothing(v) ? String[] : String[string(g) for g in v]
+    table    = string(get(body, :table, "merged"))
+    tag      = string(get(body, :tag, "rank"))
+    value    = string(get(body, :value, ""))
+    top_n    = Int(get(body, :top_n, 15))
+    relative = Bool(get(body, :relative, true))
+    mode     = string(get(body, :mode, "stacked"))
+    subgroup = let v = get(body, :subgroup, nothing)
+        (isnothing(v) || v === nothing) ? nothing : string(v)
     end
-    prefix = let p = get(body, :prefix, nothing); isnothing(p) ? nothing : string(p) end
     params = _body_filter_params(body)
     cfg_cache = Dict{Tuple{String,String,String}, Any}()
-    include_contamination = _analysis_include_contamination(study; run, group, config_cache=cfg_cache)
-    (norm_method, norm_depth) = _analysis_normalisation(study; run, group, config_cache=cfg_cache)
+    (norm_method, norm_depth) = _analysis_normalisation(study; run, group,
+                                                         config_cache=cfg_cache)
 
-    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, columns
-        scols = _filter_by_prefix(sample_columns(con, table), prefix)
-        isempty(scols) && return json_error(400, "no_samples", "No sample columns found")
-        where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
+    # Resolve sub-group prefixes for pooling (used when subgroup == "__pool__").
+    run_data_dir = joinpath(ServerState.data_dir(), study,
+                            isnothing(group) ? run : joinpath(group, run))
+    pool_groups = _is_pooled(run_data_dir) ? _subgroup_names(run_data_dir) : String[]
 
-        if isnothing(rank)
-            levels = taxonomy_levels(con, table)
-            isempty(levels) && return json_error(400, "no_taxonomy", "No taxonomy columns found")
-            rank = last(levels)
-        end
+    # Only the category branch backfills Category__ columns; rank charts read-only.
+    _with_analysis_results_table(study, run, table; group,
+                                 readonly = tag != "category") do con, columns
+        all_scols = sample_columns(con, table)
+        isempty(all_scols) && return json_error(400, "no_samples",
+                                                "No sample columns found in table '$table'")
+        # Category-tagged rendering is the composition surface; rank is taxa.
+        surface = tag == "category" ? "composition" : "taxa"
+        exclude_conditions = _exclusion_conditions(study, run, group, columns; surface, config_cache=cfg_cache)
+        where_clause, where_params = _analysis_where_clause(params, columns;
+                                                             exclude_conditions)
 
-        rank_col = taxon_column(columns, string(rank))
-        agg = aggregate_by_taxon(con, table, scols, rank_col, where_clause, where_params)
-        nrow(agg) == 0 && return json_error(400, "no_data", "No data after filtering")
+        # Source resolves the taxonomy side for category backfill; rank charts ignore it.
+        tag_source = tag == "category" ? _tagging_source(study, run; group) : ""
+        result = _chart_data(con, table, columns, all_scols,
+                             where_clause, where_params,
+                             tag, value, subgroup,
+                             pool_groups, run, top_n, tag_source)
+        result isa HTTP.Response && return result
 
-        taxon_labels = String.(agg.taxon)
-        counts_taxa_x_samples = Matrix{Float64}(agg[:, scols])
+        # normalise_counts expects samples x features; counts is segments x samples,
+        # so transpose, normalise, transpose back.
+        counts_t = permutedims(result.counts)
+        norm = normalise_counts(counts_t; method=norm_method, depth=norm_depth,
+                                seed=_study_seed(study))
+        isempty(norm.kept) && return json_error(400, "no_samples",
+                                                "All samples dropped below normalisation depth")
+        counts  = permutedims(norm.mat)
+        scols   = result.sample_names[norm.kept]
 
-        # normalise_counts expects samples x features as a concrete Matrix; `'`
-        # returns a lazy LinearAlgebra.Adjoint which fails the strict signature,
-        # so materialise both transposes with permutedims.
-        counts_t = permutedims(counts_taxa_x_samples)
-        norm_result = normalise_counts(counts_t; method=norm_method,
-                                       depth=norm_depth, seed=_study_seed(study))
-        scols = scols[norm_result.kept]
-        isempty(scols) && return json_error(400, "no_samples",
-                                            "All samples dropped below normalisation depth")
-        counts = permutedims(norm_result.mat)  # back to taxa x samples
-
-        if do_pool
-            scols, counts = pool_columns(scols, counts, pool_groups;
-                                         fallback_label=something(prefix, run))
-        end
-
-        fig = taxa_bar_chart(taxon_labels, scols, counts; top_n=Int(top_n), relative=Bool(relative))
+        colour_for = (tag == "category") ? _category_colour_for(value) : nothing
+        fig = bar_chart(result.segment_labels, scols, counts;
+                        top_n=result.effective_top_n, relative, mode, colour_for)
         HTTP.Response(200, ["Content-Type" => "application/json"],
                       body=JSON3.write(fig))
     end
@@ -170,8 +293,7 @@ end
     isnothing(dir) && return json([])
 
     table = get(HTTP.queryparams(req), "table", "merged")
-    source = get(HTTP.queryparams(req), "source", nothing)
-    _with_analysis_annotation_table(study, run, table; group, requested_source=source) do con, _, _
+    _with_analysis_results_table(study, run, table; group) do con, _columns
         json(taxonomy_levels(con, table))
     end
 end
@@ -236,34 +358,112 @@ function _study_seed(study::String)
     Int(get(get(resolved, "seed", (; value=DEFAULT_SEED, source="default")), :value, DEFAULT_SEED))
 end
 
-function _analysis_include_contamination(study::String;
-                                         run::Union{String,Nothing}=nothing,
-                                         group::Union{String,Nothing}=nothing,
-                                         config_cache::Union{Dict,Nothing}=nothing)
+# Resolve a run's config cascade, memoised in `config_cache` by (study, run, group).
+function _resolved_run_config(study::String, run, group, config_cache)
     key = (study, something(run, ""), something(group, ""))
-    resolved = if !isnothing(config_cache) && haskey(config_cache, key)
-        config_cache[key]
-    else
-        cfg = _resolve_config(study, run, group)
-        !isnothing(config_cache) && (config_cache[key] = cfg)
-        cfg
+    if !isnothing(config_cache) && haskey(config_cache, key)
+        return config_cache[key]
     end
-    entry = get(resolved, "analysis.include_contamination", (; value=false, source="default"))
-    Bool(get(entry, :value, false))
+    cfg = _resolve_config(study, run, group)
+    !isnothing(config_cache) && (config_cache[key] = cfg)
+    cfg
+end
+
+## Category-based figure exclusion
+# The chart surfaces an exclusion may apply to. "diversity" covers alpha, NMDS
+# and PERMANOVA; "taxa" is the rank-tagged chart; "composition" is the
+# category-tagged chart; "venn" the presence/absence sets.
+const _EXCLUSION_SURFACES = Set(["diversity", "taxa", "composition", "venn"])
+
+# Resolve the configured `analysis.exclude_categories` for a run into a vector of
+# (set, category, surfaces) specs. Each names a composition category set and the
+# single category within it whose taxa should be dropped. `surfaces` is the set
+# of chart surfaces the spec applies to, parsed from an optional `apply_to` list;
+# when `apply_to` is absent the spec applies to every surface (`surfaces` is
+# `nothing`). Unknown surface names are dropped with a warning.
+function _analysis_exclude_categories(study::String;
+                                      run::Union{String,Nothing}=nothing,
+                                      group::Union{String,Nothing}=nothing,
+                                      config_cache::Union{Dict,Nothing}=nothing)
+    resolved = _resolved_run_config(study, run, group, config_cache)
+    entry = get(resolved, "analysis.exclude_categories", (; value=[], source="default"))
+    raw = get(entry, :value, [])
+    specs = @NamedTuple{set::String, category::String, surfaces::Union{Nothing,Set{String}}}[]
+    raw isa AbstractVector || return specs
+    for item in raw
+        item isa AbstractDict || continue
+        set = string(get(item, "set", ""))
+        category = string(get(item, "category", ""))
+        (isempty(set) || isempty(category)) && continue
+        surfaces = _parse_apply_to(get(item, "apply_to", nothing); set, category)
+        push!(specs, (; set, category, surfaces))
+    end
+    specs
+end
+
+# Parse an `apply_to` value into a set of known surfaces, or `nothing` (all).
+# A missing or malformed value means "all surfaces"; an explicit list is filtered
+# to the known surfaces, and unknown entries are warned about and dropped.
+function _parse_apply_to(raw; set::String, category::String)
+    raw isa AbstractVector || return nothing
+    surfaces = Set{String}()
+    for s in raw
+        name = lowercase(strip(string(s)))
+        if name in _EXCLUSION_SURFACES
+            push!(surfaces, name)
+        else
+            @warn "exclude_categories: unknown apply_to surface; ignoring" set category surface=name
+        end
+    end
+    surfaces
+end
+
+# Build SQL WHERE fragments that drop rows classified into an excluded category,
+# for the given chart `surface` (see `_EXCLUSION_SURFACES`). A spec applies only
+# when its `surfaces` is `nothing` (all) or contains `surface`, so an exclusion
+# can be kept out of, say, the composition chart while still cleaning diversity.
+# The composition category CASE expression is evaluated inline and compared to
+# the excluded category name, so no Category__ column need be materialised and
+# the query stays read-only. Column references are bare (no table alias), which
+# matches the context in which these fragments are appended. `strict=true` gates
+# on exact realisability so a degraded filter drops nothing rather than the wrong
+# rows; a warning is logged for each skipped spec.
+function _exclusion_conditions(study::String, run, group, columns::Vector{String};
+                               surface::String, config_cache::Union{Dict,Nothing}=nothing)
+    isnothing(run) && return String[]
+    specs = filter(s -> isnothing(s.surfaces) || surface in s.surfaces,
+                   _analysis_exclude_categories(study; run, group, config_cache))
+    isempty(specs) && return String[]
+    source = _tagging_source(study, run; group)
+    compositions_dir = _chart_compositions_dir()
+    filters_dir = _filters_dir()
+    col_set = Set(columns)
+    conds = String[]
+    for spec in specs
+        cfg = Categories.load_category_set(spec.set; compositions_dir)
+        isnothing(cfg) && continue
+        cats = get(cfg, "categories", [])
+        case = Categories.category_case_when(cats, col_set, source;
+                                             filters_dir, table_alias="", strict=true)
+        # Drop rows only when the set is exactly realisable AND the excluded
+        # category is reachable in the CASE, either as its own branch (THEN) or
+        # as the catch-all (ELSE); otherwise the condition would silently exclude
+        # nothing or the wrong rows.
+        cat_lit = Categories._sql_str(spec.category)
+        if isnothing(case) || !(occursin("THEN $cat_lit", case) || occursin("ELSE $cat_lit", case))
+            @warn "exclude_categories: category not classifiable for this table; skipping exclusion" set=spec.set category=spec.category
+            continue
+        end
+        push!(conds, "($case) != $cat_lit")
+    end
+    conds
 end
 
 function _analysis_normalisation(study::String;
                                   run::Union{String,Nothing}=nothing,
                                   group::Union{String,Nothing}=nothing,
                                   config_cache::Union{Dict,Nothing}=nothing)
-    key = (study, something(run, ""), something(group, ""))
-    resolved = if !isnothing(config_cache) && haskey(config_cache, key)
-        config_cache[key]
-    else
-        cfg = _resolve_config(study, run, group)
-        !isnothing(config_cache) && (config_cache[key] = cfg)
-        cfg
-    end
+    resolved = _resolved_run_config(study, run, group, config_cache)
     method_entry = get(resolved, "analysis.normalisation",       (; value="none", source="default"))
     depth_entry  = get(resolved, "analysis.normalisation_depth", (; value=0,      source="default"))
     method = String(get(method_entry, :value, "none"))
@@ -271,77 +471,45 @@ function _analysis_normalisation(study::String;
     (method, depth)
 end
 
-function _resolve_analysis_source(study::String, run::String, table::String;
-                                  group::Union{String,Nothing}=nothing,
-                                  requested_source::Union{String,Nothing}=nothing)
-    sources = isnothing(requested_source) ? ("DADA2", "VSEARCH") : (requested_source,)
-    for source in sources
-        ann_db = _annotation_db_path(study, run, source; group)
-        isfile(ann_db) || continue
-        found = _with_annotation_db(study, run, source; group) do con
-            table in String.(DataFrame(DBInterface.execute(con, "SHOW TABLES")).name)
-        end
-        found === true && return source
-    end
-    nothing
-end
-
-function _resolve_analysis_source_with_sequence(study::String, run::String, table::String;
-                                                group::Union{String,Nothing}=nothing,
-                                                requested_source::Union{String,Nothing}=nothing)
-    sources = if isnothing(requested_source)
-        ("DADA2", "VSEARCH")
-    else
-        requested_source == "DADA2" ? ("DADA2", "VSEARCH") : (requested_source, "DADA2")
-    end
-    table_found_without_sequence = false
-
-    for source in sources
-        ann_db = _annotation_db_path(study, run, source; group)
-        isfile(ann_db) || continue
-        result = _with_annotation_db(study, run, source; group) do con
-            columns = _duckdb_columns(con, table)
-            isempty(columns) && return (:missing, nothing)
-            seq_col = sequence_column_name(columns)
-            isnothing(seq_col) && return (:present_without_sequence, nothing)
-            (:ok, source)
-        end
-        result == (:ok, source) && return source, false, false
-        result == (:present_without_sequence, nothing) && (table_found_without_sequence = true)
-    end
-
-    if table_found_without_sequence
-        return nothing, true, false
-    end
-    nothing, false, true
-end
-
 function _analysis_where_clause(params, columns::Vector{String};
-                                include_contamination::Bool=false)
+                                exclude_conditions::Vector{String}=String[])
     where_clause, where_params = _build_where(params, columns)
-    if !include_contamination && "Contamination" in columns
-        contam_clause = "COALESCE(LOWER(TRIM(\"Contamination\")), '') != 'yes'"
-        where_clause = isempty(where_clause) ? "WHERE $contam_clause" : "$where_clause AND $contam_clause"
+    for cond in exclude_conditions
+        where_clause = isempty(where_clause) ? "WHERE $cond" : "$where_clause AND $cond"
     end
     where_clause, where_params
 end
 
-function _with_analysis_annotation_table(f::Function, study::String, run::String, table::String;
-                                         group::Union{String,Nothing}=nothing,
-                                         requested_source::Union{String,Nothing}=nothing)
-    source = _resolve_analysis_source(study, run, table; group, requested_source)
-    isnothing(source) && return json_error(
-        404, "no_annotation_table",
-        isnothing(requested_source) ?
-            "Analysis requires an annotated '$table' table. Generate annotations first." :
-            "Analysis requires annotated '$table' data for source '$requested_source'."
-    )
-
-    _with_annotation_db(study, run, source; group) do con
+# Open a run's merged results DB for analysis and invoke `f(con, columns)`.
+# The merged table carries taxonomy ranks, Category__<set> columns and per-sample
+# counts, so every analysis reads it directly; the per-source annotation DBs of
+# the quarantined FuncDB workflow are not consulted. Pass `readonly=false` when
+# the body backfills Category__ columns via `Categories.ensure_columns!`.
+function _with_analysis_results_table(f::Function, study::String, run::String, table::String;
+                                      group::Union{String,Nothing}=nothing,
+                                      readonly::Bool=true)
+    merge_dir = _require_duckdb(study, run; group)
+    isnothing(merge_dir) && return json_error(404, "no_results",
+        "No results for run '$run' - run the pipeline first")
+    opener = readonly ? with_results_db : with_results_db_write
+    opener(merge_dir) do con
         columns = _duckdb_columns(con, table)
         isempty(columns) && return json_error(404, "table_not_found",
-                                              "Annotated table '$table' not found")
-        f(con, source, columns)
+                                              "Table '$table' not found in results database")
+        f(con, columns)
+    end
+end
+
+# Cross-run analogue: open the merged results DB of a run already resolved by
+# `_resolve_run_duckdb` (which carries its `dir`), invoking `f(con, columns)`.
+# Returns `nothing` when the table is absent so accumulating loops simply skip it.
+function _with_resolved_results_table(f::Function, resolved, table::String;
+                                      readonly::Bool=true)
+    opener = readonly ? with_results_db : with_results_db_write
+    opener(resolved.dir) do con
+        columns = _duckdb_columns(con, table)
+        isempty(columns) && return nothing
+        f(con, columns)
     end
 end
 
@@ -382,7 +550,7 @@ function _comparison_pair_key(sample_col::String, resolved; mode::Symbol)
     end
 end
 
-function _expand_comparison_run_specs(study::String, runs_spec)
+function _expand_comparison_run_specs(study::String, runs_spec; aggregate::Bool=false)
     expanded = NamedTuple[]
     for spec in runs_spec
         run_name = string(get(spec, :run, ""))
@@ -390,6 +558,10 @@ function _expand_comparison_run_specs(study::String, runs_spec)
         group  = _opt_string(spec, :group)
         prefix = _opt_string(spec, :prefix)
         source = _opt_string(spec, :source)
+        if aggregate
+            push!(expanded, (; run=run_name, group, prefix=nothing, source))
+            continue
+        end
 
         if !isnothing(prefix)
             push!(expanded, (; run=run_name, group, prefix, source))
@@ -409,37 +581,28 @@ function _expand_comparison_run_specs(study::String, runs_spec)
     expanded
 end
 
-function _collect_cross_run_asvs(study::String, runs_spec, table, params)
+function _collect_cross_run_asvs(study::String, runs_spec, table, params; aggregate::Bool=false)
     run_data = Tuple{String, Vector{String}, DataFrame}[]
     group_labels = String[]
     run_labels = String[]
     missing_seq = false
-    missing_annotation = false
     cfg_cache = Dict{Tuple{String,String,String}, Any}()
 
-    for spec in _expand_comparison_run_specs(study, runs_spec)
+    for spec in _expand_comparison_run_specs(study, runs_spec; aggregate)
         resolved = _resolve_run_duckdb(study, spec)
         isnothing(resolved) && continue
-        source, source_missing_seq, source_missing_annotation = _resolve_analysis_source_with_sequence(
-            study, resolved.run, table; group=resolved.group, requested_source=resolved.source)
-        if isnothing(source)
-            missing_seq |= source_missing_seq
-            missing_annotation |= source_missing_annotation
-            continue
-        end
-        include_contamination = _analysis_include_contamination(study; run=resolved.run, group=resolved.group, config_cache=cfg_cache)
-        _with_annotation_db(study, resolved.run, source; group=resolved.group) do con
+        _with_resolved_results_table(resolved, table) do con, columns
             scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
             isempty(scols) && return
 
-            columns = _duckdb_columns(con, table)
             seq_col = sequence_column_name(columns)
             if isnothing(seq_col)
                 missing_seq = true
                 return
             end
 
-            where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
+            exclude_conditions = _exclusion_conditions(study, resolved.run, resolved.group, columns; surface="diversity", config_cache=cfg_cache)
+            where_clause, where_params = _analysis_where_clause(params, columns; exclude_conditions)
             seq_filter = isempty(where_clause) ?
                 "WHERE \"$seq_col\" IS NOT NULL AND TRIM(\"$seq_col\") != ''" :
                 "$where_clause AND \"$seq_col\" IS NOT NULL AND TRIM(\"$seq_col\") != ''"
@@ -461,7 +624,7 @@ function _collect_cross_run_asvs(study::String, runs_spec, table, params)
         end
     end
 
-    run_data, group_labels, run_labels, missing_seq, missing_annotation
+    run_data, group_labels, run_labels, missing_seq
 end
 
 function _drop_empty_samples(mat::Matrix{Float64}, aligned::AbstractVector...)
@@ -501,7 +664,8 @@ end
     table = get(body, :table, "merged")
     params = _body_filter_params(body)
 
-    expanded_specs = _expand_comparison_run_specs(study, runs_spec)
+    aggregate = Bool(get(body, :aggregate, false))
+    expanded_specs = _expand_comparison_run_specs(study, runs_spec; aggregate)
     resolved_specs = filter(!isnothing, [_resolve_run_duckdb(study, spec) for spec in expanded_specs])
     isempty(resolved_specs) && return json_error(400, "no_data", "No data found for any run")
 
@@ -512,17 +676,11 @@ end
     # First pass: collect raw matrices (fetched inside annotation DB closures)
     collected = Tuple{Matrix{Float64}, Vector{String}, Any}[]
     for resolved in resolved_specs
-        source = _resolve_analysis_source(study, resolved.run, table; group=resolved.group,
-                                          requested_source=resolved.source)
-        isnothing(source) && continue
-        include_contamination = _analysis_include_contamination(study; run=resolved.run,
-                                                                group=resolved.group,
-                                                                config_cache=cfg_cache)
-        _with_annotation_db(study, resolved.run, source; group=resolved.group) do con
+        _with_resolved_results_table(resolved, table) do con, columns
             scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
             isempty(scols) && return
-            columns = _duckdb_columns(con, table)
-            where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
+            exclude_conditions = _exclusion_conditions(study, resolved.run, resolved.group, columns; surface="diversity", config_cache=cfg_cache)
+            where_clause, where_params = _analysis_where_clause(params, columns; exclude_conditions)
             mat = filtered_counts(con, table, scols, where_clause, where_params)
             push!(collected, (mat, scols, resolved))
         end
@@ -590,12 +748,11 @@ end
                                                     "NMDS requires at least 2 runs")
     table = get(body, :table, "merged")
     params = _body_filter_params(body)
+    aggregate = Bool(get(body, :aggregate, false))
     (norm_method, norm_depth) = _analysis_normalisation(study)
 
-    run_data, group_labels, run_name_labels, missing_seq, missing_annotation = _collect_cross_run_asvs(study, runs_spec, table, params)
+    run_data, group_labels, run_name_labels, missing_seq = _collect_cross_run_asvs(study, runs_spec, table, params; aggregate)
 
-    missing_annotation && return json_error(404, "no_annotation_table",
-                                            "NMDS requires annotated '$table' tables for the selected runs")
     missing_seq && return json_error(400, "no_sequence_data",
                                          "Table '$table' does not contain a DNA sequence column required for cross-run NMDS/PERMANOVA (expected `sequence` or `Sequence`, as in `merged` or `asv_counts`)")
     length(run_data) < 2 && return json_error(400, "too_few_runs",
@@ -648,12 +805,11 @@ end
                                                     "PERMANOVA requires at least 2 runs")
     table = get(body, :table, "merged")
     params = _body_filter_params(body)
+    aggregate = Bool(get(body, :aggregate, false))
     (norm_method, norm_depth) = _analysis_normalisation(study)
 
-    run_data, group_labels, run_labels, missing_seq, missing_annotation = _collect_cross_run_asvs(study, runs_spec, table, params)
+    run_data, group_labels, run_labels, missing_seq = _collect_cross_run_asvs(study, runs_spec, table, params; aggregate)
 
-    missing_annotation && return json_error(404, "no_annotation_table",
-                                            "PERMANOVA requires annotated '$table' tables for the selected runs")
     missing_seq && return json_error(400, "no_sequence_data",
                                          "Table '$table' does not contain a DNA sequence column required for cross-run NMDS/PERMANOVA (expected `sequence` or `Sequence`, as in `merged` or `asv_counts`)")
     length(run_data) < 2 && return json_error(400, "too_few_runs",
@@ -679,48 +835,83 @@ end
     json(result)
 end
 
-## Cross-run taxa bar chart (pooled by run / subgroup)
-@post "/api/v1/studies/{study}/analysis/taxa-bar" function(req, study::String)
+## Cross-run unified chart
+@post "/api/v1/studies/{study}/analysis/chart" function(req, study::String)
     study in _study_names() || return json_error(404, "study_not_found",
                                                      "Study '$study' not found")
     body = JSON3.read(String(req.body))
     runs_spec = get(body, :runs, [])
     isempty(runs_spec) && return json_error(400, "no_runs", "Provide at least one run")
     table    = string(get(body, :table, "merged"))
-    rank     = let r = get(body, :rank, nothing); isnothing(r) ? nothing : string(r) end
+    tag      = string(get(body, :tag, "rank"))
+    value    = string(get(body, :value, ""))
     top_n    = Int(get(body, :top_n, 15))
     relative = Bool(get(body, :relative, true))
+    mode     = string(get(body, :mode, "stacked"))
+    subgroup = let v = get(body, :subgroup, nothing)
+        (isnothing(v) || v === nothing) ? nothing : string(v)
+    end
     params   = _body_filter_params(body)
     (norm_method, norm_depth_cfg) = _analysis_normalisation(study)
     cfg_cache = Dict{Tuple{String,String,String}, Any}()
 
     # Collect per-run aggregated counts.
     collected = Tuple{String, Vector{String}, DataFrame}[]
+    effective_top_n = (tag == "category") ? typemax(Int) : top_n
+
     for spec in runs_spec
         resolved = _resolve_run_duckdb(study, spec)
         isnothing(resolved) && continue
-        source = _resolve_analysis_source(study, resolved.run, table;
-                                          group=resolved.group,
-                                          requested_source=resolved.source)
-        isnothing(source) && continue
-        include_contamination = _analysis_include_contamination(study;
-            run=resolved.run, group=resolved.group, config_cache=cfg_cache)
-        _with_analysis_annotation_table(study, resolved.run, table;
-            group=resolved.group, requested_source=source) do con, _, columns
-            scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
-            isempty(scols) && return nothing
-            where_clause, where_params = _analysis_where_clause(params, columns; include_contamination)
+        # Only the category branch backfills Category__ columns; rank charts read-only.
+        _with_resolved_results_table(resolved, table; readonly = tag != "category") do con, columns
 
-            r = if isnothing(rank)
-                levels = taxonomy_levels(con, table)
-                isempty(levels) && return nothing
-                last(levels)
+            # Scope sample columns to the requested subgroup prefix (not "__pool__" here).
+            prefix_scope = (isnothing(subgroup) || subgroup == "__pool__") ?
+                            resolved.prefix : subgroup
+            scols = _filter_by_prefix(sample_columns(con, table), prefix_scope)
+            isempty(scols) && return nothing
+            surface = tag == "category" ? "composition" : "taxa"
+            exclude_conditions = _exclusion_conditions(study, resolved.run, resolved.group, columns; surface, config_cache=cfg_cache)
+            where_clause, where_params = _analysis_where_clause(params, columns;
+                                                                exclude_conditions)
+
+            label_col = if tag == "rank"
+                r = isempty(value) ? begin
+                        levels = taxonomy_levels(con, table)
+                        isempty(levels) && return nothing
+                        last(levels)
+                    end : value
+                col = taxon_column(columns, string(r))
+                isnothing(col) && return json_error(400, "bad_rank",
+                                                    "Unknown rank '$r'")
+                col
             else
-                rank
+                # The tagging source backfills Category__ columns for older runs.
+                tag_source = _tagging_source(study, resolved.run; group=resolved.group)
+                Categories.ensure_columns!(con, table, tag_source, [value];
+                                           compositions_dir=_chart_compositions_dir(),
+                                           filters_dir=_filters_dir())
+                col = Categories.column_name(value)
+                # Guard: skip this run if the category column is absent (set config missing).
+                present = Set(string.(DataFrame(DBInterface.execute(con,
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                    [table])).column_name))
+                col in present || return nothing
+                col
             end
-            rank_col = taxon_column(columns, string(r))
-            agg = aggregate_by_taxon(con, table, scols, rank_col, where_clause, where_params)
+
+            agg = aggregate_by_taxon(con, table, scols, label_col,
+                                     where_clause, where_params)
             nrow(agg) == 0 && return nothing
+
+            # Zero-read guard: drop label rows that are all-zero across scols.
+            row_totals = vec(sum(Matrix{Float64}(agg[:, scols]), dims=2))
+            keep_rows  = row_totals .> 0
+            if !all(keep_rows)
+                agg = agg[keep_rows, :]
+            end
+            nrow(agg) == 0 && return nothing
+
             label = _resolved_group_label(resolved)
             push!(collected, (label, scols, agg))
             nothing
@@ -730,23 +921,39 @@ end
     isempty(collected) && return json_error(400, "no_data", "No data found for any run")
 
     # Combine across runs via the existing helper.
-    mat, all_samples, taxa_labels, run_labels = combined_counts_across_runs(collected)
+    mat, all_samples, segment_labels, run_labels = combined_counts_across_runs(collected)
 
-    # Normalise (samples x taxa stays samples x taxa).
+    # Normalise (samples x segments).
     norm_depth = _resolve_cross_run_depth(norm_method, norm_depth_cfg, (mat,))
     seed = _study_seed(study)
     (; mat, kept) = normalise_counts(mat; method=norm_method, depth=norm_depth, seed)
-    all_samples  = all_samples[kept]
-    run_labels   = run_labels[kept]
+    all_samples = all_samples[kept]
+    run_labels  = run_labels[kept]
     isempty(kept) && return json_error(400, "no_samples",
                                             "All samples dropped below normalisation depth")
 
-    # Transpose to taxa x samples, then pool by run label.
-    counts = permutedims(mat)  # taxa x samples
-    unique_labels = unique(run_labels)
-    scols, counts = pool_columns(all_samples, counts, unique_labels)
+    # Transpose to segments x samples.
+    counts = permutedims(mat)
 
-    fig = taxa_bar_chart(taxa_labels, scols, counts; top_n, relative)
+    # Zero-read guard on the combined matrix.
+    row_totals = vec(sum(counts, dims=2))
+    keep_rows  = row_totals .> 0
+    if !all(keep_rows)
+        segment_labels = segment_labels[keep_rows]
+        counts         = counts[keep_rows, :]
+    end
+
+    # Pool: cross-run always pools by run label when subgroup == "__pool__" or by default.
+    unique_labels = unique(run_labels)
+    if isnothing(subgroup) || subgroup == "__pool__"
+        scols, counts = pool_columns(all_samples, counts, unique_labels)
+    else
+        scols = all_samples
+    end
+
+    colour_for = (tag == "category") ? _category_colour_for(value) : nothing
+    fig = bar_chart(segment_labels, scols, counts;
+                    top_n=effective_top_n, relative, mode, colour_for)
     HTTP.Response(200, ["Content-Type" => "application/json"],
                   body=JSON3.write(fig))
 end
@@ -791,42 +998,30 @@ end
 
     # Collect each condition with its identity components so we can compute
     # disambiguated labels after seeing the full set of selected conditions.
+    aggregate = Bool(get(body, :aggregate, false))
     conditions = NamedTuple{
         (:group, :run, :prefix, :taxa),
         Tuple{Union{String,Nothing}, String, Union{String,Nothing}, Vector{String}}
     }[]
     cfg_cache  = Dict{Tuple{String,String,String}, Any}()
-    missing_annotation = false
 
-    for spec in _expand_comparison_run_specs(study, runs_spec)
+    for spec in _expand_comparison_run_specs(study, runs_spec; aggregate)
         resolved = _resolve_run_duckdb(study, spec)
         isnothing(resolved) && continue
 
-        source = _resolve_analysis_source(study, resolved.run, table;
-                                          group=resolved.group,
-                                          requested_source=resolved.source)
-        if isnothing(source)
-            missing_annotation = true
-            continue
-        end
-
-        include_contamination = _analysis_include_contamination(
-            study; run=resolved.run, group=resolved.group, config_cache=cfg_cache)
-
-        _with_annotation_db(study, resolved.run, source; group=resolved.group) do con
-            columns = _duckdb_columns(con, table)
-            isempty(columns) && return
-
+        _with_resolved_results_table(resolved, table) do con, columns
             levels = taxonomy_levels(con, table)
             isempty(levels) && return
             effective_rank = rank in levels ? rank : last(levels)
             rank_col = taxon_column(columns, effective_rank)
+            isnothing(rank_col) && return
 
             scols = _filter_by_prefix(sample_columns(con, table), resolved.prefix)
             isempty(scols) && return
 
+            exclude_conditions = _exclusion_conditions(study, resolved.run, resolved.group, columns; surface="venn", config_cache=cfg_cache)
             where_clause, where_params = _analysis_where_clause(params, columns;
-                                                                include_contamination)
+                                                                exclude_conditions)
             taxa = venn_taxa_present(con, table, scols, rank_col,
                                      where_clause, where_params)
             push!(conditions, (; group=resolved.group, run=resolved.run,
@@ -834,10 +1029,6 @@ end
         end
     end
 
-    if isempty(conditions) && missing_annotation
-        return json_error(404, "no_annotation_table",
-            "No annotated '$table' table found for the selected runs")
-    end
     length(conditions) < 2 && return json_error(400, "too_few_conditions",
         "Need data from at least 2 conditions for the taxon overlap diagram")
 

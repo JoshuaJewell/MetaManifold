@@ -1,7 +1,7 @@
 // © 2026 Joshua Benjamin Jewell. All rights reserved.
 // Licensed under the GNU Affero General Public License version 3 (AGPLv3).
 import type { CSSProperties } from 'react'
-import type { AnnotationMeta, AnnotationSource, ConfigSource } from '../api/types'
+import type { AnnotationSource, ConfigSource, TableMeta } from '../api/types'
 import { api } from '../api/client'
 
 export type ContamStatus = 'unassigned' | 'yes' | 'no'
@@ -117,27 +117,22 @@ export function prefillFromRow(row: Record<string, unknown>, source: AnnotationS
 export interface AnalysisOption {
   key: string
   table: string
-  source: AnnotationSource
+  /** The configured tagging source is resolved server-side; kept optional for
+   *  callers that still thread it, but analysis no longer selects by source. */
+  source?: AnnotationSource
   label: string
 }
 
-/** Discover annotated tables available for a single run. */
-export async function discoverAnnotationOptions(
+/**
+ * Discover the analysable result tables for a single run (merged, merged_otu,
+ * and any saved sub-tables) from the run's results database. Analysis reads the
+ * merged results table directly, so no annotation database is consulted.
+ */
+export async function discoverResultsTables(
   study: string, run: string, group?: string | null,
 ): Promise<AnalysisOption[]> {
-  const listings = await Promise.all(
-    SOURCES.map(source =>
-      api.annotations.list(study, run, source, group).catch(() => [] as AnnotationMeta[]),
-    ),
-  )
-  return listings
-    .flat()
-    .filter(meta => meta.status === 'fresh' || meta.status === 'stale')
-    .map(meta => ({
-      key: `${meta.source}:${meta.table}`,
-      table: meta.table,
-      source: meta.source,
-      label: `${meta.table} (${meta.source})`,
-    }))
-    .sort((a, b) => a.table !== b.table ? a.table.localeCompare(b.table) : a.source.localeCompare(b.source))
+  const tables = await api.results.runTables(study, run, group).catch(() => [] as TableMeta[])
+  return tables
+    .map(meta => ({ key: meta.id, table: meta.id, label: meta.label }))
+    .sort((a, b) => a.label.localeCompare(b.label))
 }
