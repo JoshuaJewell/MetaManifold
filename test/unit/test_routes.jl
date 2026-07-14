@@ -310,9 +310,11 @@ SV = Main.Server
         end
 
         ## Category happy path: write "default" category column, then call _chart_data.
-        # Loads the real shipped composition library so the "default" set is
-        # resolved exactly as it is in production.
-        lib_path = joinpath(@__DIR__, "..", "..", "config", "composition.yml")
+        # Loads the shipped composition library so the "default" set is resolved
+        # exactly as it is in production. Not config/composition.yml: that is the
+        # machine copy, gitignored and editable from the UI, so a suite reading it
+        # fails on a clean checkout and breaks whenever the user edits a set.
+        lib_path = joinpath(@__DIR__, "..", "..", "config", "defaults", "composition.yml")
         library = SV.CompositionLibrary.load(lib_path)
         SV.Categories.write_category_columns!(con, "merged", "VSEARCH", ["default"]; library)
         columns_after = SV._duckdb_columns(con, "merged")

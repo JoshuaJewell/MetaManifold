@@ -137,9 +137,11 @@ end
 end
 
 @testset "shipped contamination set keeps only the whitelist" begin
-    # The composition library at config/composition.yml is the single source
-    # of truth for both the set and the filters it references by name.
-    lib_path = joinpath(@__DIR__, "..", "..", "config", "composition.yml")
+    # config/defaults/composition.yml is the shipped library and the single
+    # source of truth for both the set and the filters it references by name.
+    # Read the default rather than config/composition.yml, which is the machine
+    # copy: gitignored, absent from a clean checkout, and editable from the UI.
+    lib_path = joinpath(@__DIR__, "..", "..", "config", "defaults", "composition.yml")
     lib = CompositionLibrary.load(lib_path)
     cfg = get(lib["sets"], "contamination", nothing)
     @test !isnothing(cfg)
