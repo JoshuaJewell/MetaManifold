@@ -9,17 +9,33 @@
 #   julia --project=. install.jl [--update] [--modify] [--sysimage]
 #
 # Options:
-#   --update    Re-check tool versions and update managed binaries in bin/
+#   --update    Re-assert the pinned tool versions and refresh managed binaries in bin/
 #   --modify    Revisit configured tool paths instead of silently reusing them
 #   --sysimage  After installation, compile a sysimage of all Julia deps to
 #               speed up subsequent startup. Output: MetaManifold.so (.dylib on macOS)
 #               Use with: julia --sysimage MetaManifold.so --project=. ...
+#
+# Pinning: every external tool version, download URL, and archive checksum lives in
+# config/defaults/tool_versions.yml, and nothing in this script tracks "latest".
+# Two clean installs a year apart therefore obtain the same binaries. --update
+# re-fetches those same pins rather than advancing them, so it is idempotent; a
+# version moves only when that file is edited. Any archive whose SHA256 does not
+# match its pin is refused, not installed.
 
 using Pkg
-@info "Installing Julia package dependencies..."
-Pkg.instantiate()
+
+# False when the test suite loads this file to exercise the pin lookup and the
+# checksum refusal. Nothing may be installed, and no dependency resolved, on a load
+# that is not an install.
+const RUNNING_AS_SCRIPT = abspath(PROGRAM_FILE) == abspath(@__FILE__)
+
+if RUNNING_AS_SCRIPT
+    @info "Installing Julia package dependencies..."
+    Pkg.instantiate()
+end
 
 using YAML
+using SHA
 import Downloads
 
 ## Instantiate
@@ -30,6 +46,7 @@ const PROJECT_ROOT  = @__DIR__
 const BIN_DIR       = joinpath(PROJECT_ROOT, "bin")
 const CONFIG_DIR    = joinpath(PROJECT_ROOT, "config")
 const TOOLS_CONFIG  = joinpath(CONFIG_DIR, "tools.yml")
+const VERSIONS_FILE = joinpath(CONFIG_DIR, "defaults", "tool_versions.yml")
 
 const OS_TYPE = Sys.islinux() ? "linux" :
                 Sys.isapple() ? "macos" :
@@ -44,6 +61,31 @@ const BINARY_NAMES = Dict("cd_hit_est" => "cd-hit-est")
 bin_name(key::String) = get(BINARY_NAMES, key, key)
 
 mkpath(BIN_DIR)
+
+## Version pins
+# The pin file is the sole source of truth for what this installer fetches. Without
+# it there is no defensible version to install, so its absence is fatal rather than
+# an invitation to fall back on whatever upstream published most recently.
+isfile(VERSIONS_FILE) || error(
+    "Version pin file not found: $VERSIONS_FILE\n" *
+    "It is committed to the repository; a checkout missing it is incomplete."
+)
+const PINS     = YAML.load_file(VERSIONS_FILE)
+const PLATFORM = "$(OS_TYPE)-$(ARCH_STR)"
+
+pinned_version(tool::String)::String = string(PINS["tools"][tool]["version"])
+
+# The archive pinned for this platform, or the "any" entry for artefacts that are
+# not platform-specific (FastQC is Java; cd-hit is compiled from source).
+function pinned_archive(tool::String)::Dict
+    archives = PINS["tools"][tool]["archives"]
+    rec = get(archives, PLATFORM, get(archives, "any", nothing))
+    rec === nothing && error(
+        "No $tool archive is pinned for $PLATFORM in $VERSIONS_FILE.\n" *
+        "Add one, with its SHA256, or install $tool yourself and give install.jl the path."
+    )
+    rec
+end
 
 ## Config loading / saving
 function load_tools_config()::Dict{String,Any}
@@ -115,24 +157,6 @@ function prompt_path(label::String)::Union{String,Nothing}
 end
 
 ## Download helpers
-# Fetch URL content as a String. Returns nothing on failure.
-function fetch_string(url::String)::Union{String,Nothing}
-    try
-        buf = IOBuffer()
-        Downloads.download(url, buf; headers=["User-Agent" => "MetaManifold-installer"])
-        String(take!(buf))
-    catch e
-        @warn "Could not fetch $url: $e"
-        nothing
-    end
-end
-
-# Return the first capture group of `pattern` in `s`, or nothing.
-function first_match(pattern::Regex, s::String)::Union{String,Nothing}
-    m = match(pattern, s)
-    m === nothing ? nothing : m[1]
-end
-
 # Download `url` to `dest`.
 function download_to(url::String, dest::String)
     @info "Downloading $(basename(url))..."
@@ -148,63 +172,92 @@ function find_file_in_dir(dir::String, filename::String)::Union{String,Nothing}
     nothing
 end
 
-## Tool download functions
-function download_vsearch()::String
-    @info "Fetching latest vsearch release info from GitHub..."
-    json = fetch_string("https://api.github.com/repos/torognes/vsearch/releases/latest")
-    json === nothing && error("Cannot reach GitHub API. Check your internet connection.")
-
-    # Find a download URL matching OS and architecture
-    pattern = Regex(
-        "\"browser_download_url\":\\s*\"(https://[^\"]*vsearch[^\"]*$(OS_TYPE)[^\"]*$(ARCH_STR)[^\"]*.tar.gz)\""
+# Reject the file unless it hashes to `expected`. A missing pin is a recorded
+# absence of a checksum, not licence to dispense with one, so it aborts rather
+# than install bytes nobody has vouched for. The offending file is deleted so that
+# a failed run cannot leave a half-trusted artefact behind for the next one.
+function verify_sha256(path::String, expected, source::String)
+    expected === nothing && error(
+        "No SHA256 is pinned for $source in $VERSIONS_FILE.\n" *
+        "Record the checksum before installing; an unverifiable download is refused."
     )
-    url = first_match(pattern, json)
-
-    # Fallback to any tar.gz for this OS
-    if url === nothing
-        url = first_match(
-            Regex("\"browser_download_url\":\\s*\"(https://[^\"]*vsearch[^\"]*$(OS_TYPE)[^\"]*.tar.gz)\""),
-            json
+    actual = bytes2hex(open(sha256, path))
+    want   = lowercase(strip(string(expected)))
+    if actual != want
+        rm(path; force=true)
+        error(
+            "Checksum mismatch for $(basename(source)).\n" *
+            "  expected: $want\n" *
+            "  actual:   $actual\n" *
+            "The download does not match its pin in $VERSIONS_FILE, so it is not the\n" *
+            "artefact this project was tested against. Refusing to install it."
         )
     end
+    @info "Verified SHA256 of $(basename(source))."
+end
 
-    url === nothing && error(
-        "No vsearch binary found for $OS_TYPE/$ARCH_STR in the latest release.\n" *
-        "Check https://github.com/torognes/vsearch/releases for available builds."
-    )
-
-    tarball = joinpath(BIN_DIR, "vsearch_download.tar.gz")
-    download_to(url, tarball)
-    run(`tar -xzf $tarball -C $BIN_DIR --warning=no-unknown-keyword`)
-    rm(tarball)
-
-    bin = find_file_in_dir(BIN_DIR, "vsearch")
-    bin === nothing && error("vsearch binary not found after extraction.")
-
-    dest = joinpath(BIN_DIR, "vsearch")
-    bin != dest && mv(bin, dest; force=true)
-    chmod(dest, 0o755)
+function download_verified(url::String, dest::String, expected)
+    download_to(url, dest)
+    verify_sha256(dest, expected, url)
     dest
 end
 
+## Tool download functions
+# Unpack `tarball` in a scratch directory and move `binary` out of it into bin/.
+# Unpacking away from bin/ is what keeps the result deterministic: a source tree
+# left by an earlier version can otherwise be picked up in place of this one.
+function extract_binary(tarball::String, binary::String)::String
+    workdir = mktempdir()
+    try
+        run(`tar -xzf $tarball -C $workdir --warning=no-unknown-keyword`)
+        found = find_file_in_dir(workdir, binary)
+        found === nothing && error("$binary not found in $(basename(tarball)) after extraction.")
+        dest = joinpath(BIN_DIR, binary)
+        mv(found, dest; force=true)
+        chmod(dest, 0o755)
+        return dest
+    finally
+        rm(workdir; recursive=true, force=true)
+    end
+end
+
+function download_pinned_binary(tool::String, binary::String)::String
+    rec     = pinned_archive(tool)
+    version = pinned_version(tool)
+    @info "Installing $tool $version (pinned)..."
+
+    tarball = joinpath(BIN_DIR, "$(binary)_download.tar.gz")
+    try
+        download_verified(rec["url"], tarball, get(rec, "sha256", nothing))
+        return extract_binary(tarball, binary)
+    finally
+        rm(tarball; force=true)
+    end
+end
+
+download_vsearch()::String = download_pinned_binary("vsearch", "vsearch")
 
 function download_fastqc()::String
-    # Pin to a known-good version. Babraham doesn't provide a releases API,
-    # so we can't auto-detect the latest. Update this version periodically.
-    version = "0.12.1"
-    url = "https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v$(version).zip"
+    rec     = pinned_archive("fastqc")
+    version = pinned_version("fastqc")
+    url     = string(rec["url"])
 
     zipfile = joinpath(BIN_DIR, "fastqc.zip")
     try
         download_to(url, zipfile)
     catch e
+        rm(zipfile; force=true)
         error(
-            "Failed to download FastQC v$version - the URL may have changed.\n" *
-            "Download manually from https://www.bioinformatics.babraham.ac.uk/projects/fastqc/\n" *
-            "and place the fastqc binary in bin/.\n" *
+            "Failed to download FastQC v$version from $url\n" *
+            "Babraham publish no release API, so this URL is pinned by hand in\n" *
+            "$VERSIONS_FILE and may have moved. Download it manually from\n" *
+            "https://www.bioinformatics.babraham.ac.uk/projects/fastqc/ and place the\n" *
+            "fastqc binary in bin/.\n" *
             "Original error: $e"
         )
     end
+    verify_sha256(zipfile, get(rec, "sha256", nothing), url)
+
     run(`unzip -q -o $zipfile -d $BIN_DIR`)
     rm(zipfile)
 
@@ -215,9 +268,15 @@ function download_fastqc()::String
 end
 
 function download_cdhit()::String
+    version = pinned_version("cd_hit_est")
+
     pkg_cmd = package_install_cmd(["cd-hit"]; brew_pkg="cd-hit")
     if pkg_cmd !== nothing
-        @info "Trying package manager install for cd-hit..."
+        # A distribution package is whatever that distribution ships, which need not
+        # be the pinned version. It is preferred anyway, because building cd-hit from
+        # source needs a C++ toolchain that many machines lack; the version actually
+        # obtained is recorded at preflight, where a discrepancy is visible.
+        @info "Trying package manager install for cd-hit (expected v$version)..."
         try
             run(pkg_cmd)
             found = Sys.which("cd-hit-est")
@@ -227,35 +286,40 @@ function download_cdhit()::String
         end
     end
 
-    # Fallback: build from source tarball (no precompiled Linux binary on GitHub).
+    # Fallback: build from the pinned source tarball (upstream publish no precompiled
+    # Linux binary).
     Sys.which("make") === nothing && error(
         "cd-hit could not be installed via package manager and 'make' is not available to build from source.\n" *
         "Install cd-hit manually and enter the path to cd-hit-est when prompted."
     )
 
-    url = "https://github.com/weizhongli/cdhit/releases/download/V4.8.1/cd-hit-v4.8.1-2019-0228.tar.gz"
-    @info "Downloading cd-hit v4.8.1 source and building from source..."
+    rec     = pinned_archive("cd_hit_est")
     tarball = joinpath(BIN_DIR, "cdhit_download.tar.gz")
-    download_to(url, tarball)
-    run(`tar -xzf $tarball -C $BIN_DIR --warning=no-unknown-keyword`)
-    rm(tarball)
+    workdir = mktempdir()
+    try
+        @info "Downloading cd-hit v$version source and building from source..."
+        download_verified(string(rec["url"]), tarball, get(rec, "sha256", nothing))
+        run(`tar -xzf $tarball -C $workdir --warning=no-unknown-keyword`)
 
-    # Find the extracted source directory
-    src_dir = nothing
-    for entry in readdir(BIN_DIR; join=true)
-        isdir(entry) && startswith(basename(entry), "cd-hit") && (src_dir = entry; break)
+        src_dir = nothing
+        for entry in readdir(workdir; join=true)
+            isdir(entry) && startswith(basename(entry), "cd-hit") && (src_dir = entry; break)
+        end
+        src_dir === nothing && error("cd-hit source directory not found after extraction.")
+
+        run(Cmd(`make -j$(Sys.CPU_THREADS)`; dir=src_dir))
+
+        bin = joinpath(src_dir, "cd-hit-est")
+        isfile(bin) || error("cd-hit-est binary not found after building. Check that a C++ compiler is installed.")
+
+        dest = joinpath(BIN_DIR, "cd-hit-est")
+        cp(bin, dest; force=true)
+        chmod(dest, 0o755)
+        return dest
+    finally
+        rm(tarball; force=true)
+        rm(workdir; recursive=true, force=true)
     end
-    src_dir === nothing && error("cd-hit source directory not found after extraction.")
-
-    run(Cmd(`make -j$(Sys.CPU_THREADS)`; dir=src_dir))
-
-    bin = joinpath(src_dir, "cd-hit-est")
-    isfile(bin) || error("cd-hit-est binary not found after building. Check that a C++ compiler is installed.")
-
-    dest = joinpath(BIN_DIR, "cd-hit-est")
-    cp(bin, dest; force=true)
-    chmod(dest, 0o755)
-    dest
 end
 
 """
@@ -317,19 +381,33 @@ function pipx_has_tool(name::String)::Bool
     Sys.which("pipx") === nothing && return false
     try
         output = read(`pipx list --short`, String)
-        return any(strip(line) == name for line in split(output, '\n'))
+        # Each line reads "<package> <version>", so only the first field is the name.
+        for line in split(output, '\n')
+            fields = split(strip(line))
+            !isempty(fields) && fields[1] == name && return true
+        end
+        return false
     catch
         return false
     end
 end
 
 function install_python_tool(name::String)::String
+    version = pinned_version(name)
+    spec    = "$(name)==$(version)"
+
     # pipx (recommended on PEP 668 / Debian-managed systems)
     if Sys.which("pipx") !== nothing
-        action = pipx_has_tool(name) ? "upgrade" : "install"
+        # There is no upgrade path, by design: `pipx upgrade` would walk the tool off
+        # its pin. Where the tool is already present, --force reinstalls it at the
+        # pinned version, which is also what makes --update idempotent rather than
+        # a slow drift towards whatever PyPI published last.
+        args = pipx_has_tool(name) ?
+            ["pipx", "install", "--force", spec] :
+            ["pipx", "install", spec]
 
-        @info "$(uppercasefirst(action))ing $name via pipx..."
-        run(Cmd(["pipx", action, name]))
+        @info "Installing $spec via pipx..."
+        run(Cmd(args))
         ensure_local_bin_on_path()
         found = find_in_path(name)
         found !== nothing && return found
@@ -354,9 +432,9 @@ function install_python_tool(name::String)::String
         "Neither pipx nor pip found. Install pipx (recommended) or Python 3 with pip."
     )
 
-    @info "Installing $name via pip..."
+    @info "Installing $spec via pip..."
     success = try
-        run(`$pip_cmd install --user $name`)
+        run(`$pip_cmd install --user $spec`)
         true
     catch
         false
@@ -365,7 +443,7 @@ function install_python_tool(name::String)::String
     if !success
         # Fallback 2 to PEP 668: externally-managed environment, try --break-system-packages
         @warn "pip --user blocked by system policy. Retrying with --break-system-packages..."
-        run(`$pip_cmd install --user --break-system-packages $name`)
+        run(`$pip_cmd install --user --break-system-packages $spec`)
     end
 
     ensure_local_bin_on_path()
@@ -382,50 +460,16 @@ function install_python_tool(name::String)::String
 end
 
 function download_swarm()::String
-    # Check for bundled binary first.
+    # An already-present bin/swarm is honoured, but not under --update, whose whole
+    # purpose is to re-assert the pin. Trusting it there would let a binary of
+    # unknown provenance, predating the pins, survive every update indefinitely.
     bundled = joinpath(BIN_DIR, "swarm")
-    if isfile(bundled) && Sys.isexecutable(bundled)
+    if !UPDATE_MODE && isfile(bundled) && Sys.isexecutable(bundled)
         @info "Using bundled swarm binary at $bundled"
         return bundled
     end
 
-    @info "Fetching latest swarm release info from GitHub..."
-    json = fetch_string("https://api.github.com/repos/torognes/swarm/releases/latest")
-    json === nothing && error("Cannot reach GitHub API. Check your internet connection.")
-
-    # Match e.g. swarm-3.1.6-linux-x86_64
-    os_tag   = OS_TYPE == "linux" ? "linux" : "macos"
-    arch_tag = ARCH_STR
-    pattern  = Regex(
-        "\"browser_download_url\":\\s*\"(https://[^\"]*swarm[^\"]*$(os_tag)[^\"]*$(arch_tag)[^\"]*)\""
-    )
-    url = first_match(pattern, json)
-
-    # Fallback: any asset for this OS
-    if url === nothing
-        url = first_match(
-            Regex("\"browser_download_url\":\\s*\"(https://[^\"]*swarm[^\"]*$(os_tag)[^\"]*)\""),
-            json
-        )
-    end
-
-    url === nothing && error(
-        "No swarm binary found for $OS_TYPE/$ARCH_STR in the latest GitHub release.\n" *
-        "Download manually from https://github.com/torognes/swarm/releases and place at bin/swarm."
-    )
-
-    tarball = joinpath(BIN_DIR, "swarm_download.tar.gz")
-    download_to(url, tarball)
-    run(`tar -xzf $tarball -C $BIN_DIR --warning=no-unknown-keyword`)
-    rm(tarball)
-
-    bin = find_file_in_dir(BIN_DIR, "swarm")
-    bin === nothing && error("swarm binary not found after extraction.")
-
-    dest = joinpath(BIN_DIR, "swarm")
-    bin != dest && mv(bin, dest; force=true)
-    chmod(dest, 0o755)
-    dest
+    download_pinned_binary("swarm", "swarm")
 end
 
 function install_r_sysdeps()
@@ -766,6 +810,14 @@ function main()
         println()
     end
 
+    # State the pins up front. An installer that says nothing about the versions it
+    # is about to fetch leaves the operator no way to notice a wrong one.
+    println("  Pinned tool versions ($VERSIONS_FILE):")
+    for key in sort(collect(keys(PINS["tools"])))
+        println("    $(rpad(bin_name(key), 12)) $(pinned_version(key))")
+    end
+    println()
+
     config = load_tools_config()
     resolved = Dict{String,Any}()
 
@@ -838,4 +890,4 @@ function main()
     println("    path: \"user@bioserver:/home/user/software/vsearch\"")
 end
 
-main()
+RUNNING_AS_SCRIPT && main()

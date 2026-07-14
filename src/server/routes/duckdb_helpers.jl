@@ -8,16 +8,15 @@ function _duckdb_columns(con, table::String)
     String[string(row.column_name) for row in eachrow(df)]
 end
 
-# Returns integer columns that represent sample read counts. Excludes bootstrap
-# columns (`*_boot`) and the grand- and per-subgroup totals (`total`, `total_*`)
-# written by `Annotation._add_totals!`; without these exclusions, summing every
-# integer column on an annotated table double-counts every read.
+# Returns the columns that represent sample read counts. The data-table path and
+# the chart path must not hold divergent notions of what a sample column is, or
+# the two endpoints report different read totals for the same run.
+# `Analysis.sample_columns` is the single definition: it admits every numeric
+# type rather than integers alone, and it alone excludes the identifier columns
+# (OTU, ASV, Pident) as well as the bootstraps and the derived totals written by
+# `Annotation._add_totals!`.
 function _sample_count_columns(con, table::String)
-    result = DBInterface.execute(con,
-        "SELECT column_name FROM information_schema.columns WHERE table_name = ? AND data_type LIKE '%INT%'",
-        [table])
-    filter(c -> !endswith(c, "_boot") && c != "total" && !startswith(c, "total_"),
-           String[string(r.column_name) for r in eachrow(DataFrame(result))])
+    Analysis.sample_columns(con, table)
 end
 
 function _sum_reads(con, table::String, count_cols::Vector{String}, where::String="", sql_params::Vector=Any[])

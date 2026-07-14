@@ -273,6 +273,11 @@ export swarm
         end
 
         mkpath(swarm_dir); mkpath(log_dir)
+        # Each command below appends to its own log, so the stage clears all three
+        # once here; otherwise a re-run would accrete onto the previous run's record.
+        reset_tool_logs(joinpath(log_dir, "filter_ns.log"),
+                        joinpath(log_dir, "swarm.log"),
+                        joinpath(log_dir, "rename.log"))
 
         args = _swarm_args(cfg)
 

@@ -135,3 +135,48 @@ Pairs:
         rm(primers_path; force=true)
     end
 end
+
+@testset "Tools - _run_logged appends and records the command" begin
+    td       = mktempdir()
+    log_path = joinpath(td, "logs", "tool.log")
+
+    try
+        @testset "records the resolved command line and a timestamp" begin
+            Tools._run_logged("echo first-run", log_path)
+            content = read(log_path, String)
+
+            @test occursin("[MetaManifold] cmd: echo first-run", content)
+            @test occursin(r"\[MetaManifold\] command at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", content)
+            @test occursin("first-run", content)
+            # The command is recorded before the output it produced.
+            @test findfirst("cmd: echo first-run", content)[1] <
+                  findlast("first-run", content)[1]
+        end
+
+        @testset "a second command does not destroy the first" begin
+            Tools._run_logged("echo second-run", log_path)
+            content = read(log_path, String)
+
+            @test occursin("first-run", content)
+            @test occursin("second-run", content)
+            @test count(x -> occursin("[MetaManifold] cmd: ", x),
+                        split(content, '\n')) == 2
+        end
+
+        @testset "failure echoes the log to stderr and rethrows" begin
+            fail_log = joinpath(td, "logs", "fail.log")
+            err_path = joinpath(td, "stderr.txt")
+            open(err_path, "w") do errio
+                @test_throws Exception redirect_stderr(errio) do
+                    Tools._run_logged("echo doomed && exit 3", fail_log)
+                end
+            end
+            @test occursin("doomed", read(err_path, String))
+            # The command survives the failure, which is when it matters most.
+            @test occursin("[MetaManifold] cmd: echo doomed && exit 3",
+                           read(fail_log, String))
+        end
+    finally
+        rm(td; recursive=true, force=true)
+    end
+end

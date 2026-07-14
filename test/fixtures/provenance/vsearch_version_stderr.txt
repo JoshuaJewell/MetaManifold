@@ -1,0 +1,3 @@
+vsearch v2.30.5_linux_x86_64, 15.3GB RAM, 24 cores
+https://github.com/torognes/vsearch
+

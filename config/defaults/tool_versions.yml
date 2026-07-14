@@ -1,0 +1,121 @@
+# Pinned versions of every component MetaManifold does not build itself.
+#
+# This file is the single source of truth for those pins. install.jl downloads
+# against it, CI installs against it, and the pipeline is expected to assert at
+# preflight that what is installed matches what is recorded here. A pin changes
+# only by a deliberate edit to this file, never by an installer picking up
+# whatever upstream published most recently.
+#
+# This is NOT machine configuration and it is NOT a template. Unlike the sibling
+# tools.yml, it is never copied into config/; the copy list in
+# Project.new_project is an explicit whitelist that omits it. Machine-specific
+# tool paths belong in config/tools.yml; the versions those paths are expected
+# to hold belong here.
+#
+# On checksums. sha256 is the checksum of the downloaded archive, not of the
+# extracted binary, since the archive is the only artefact the installer sees
+# before it trusts it. Every hash below was computed on 2026-07-14 from the bytes
+# the recorded URL actually served, and each URL was confirmed to resolve. For
+# vsearch and swarm the hash is corroborated independently by the `digest` field
+# GitHub's release API reports for the same asset; for FastQC and cd-hit no
+# upstream checksum is published, so the hash attests only to what that URL
+# served on that date, which is still enough to detect later drift or tampering.
+#
+# A null sha256 would mean no checksum has been recorded and the download cannot
+# be verified. None is null today. Should a future pin have to be added without a
+# checksum, set it to null explicitly and say so; never guess a hash.
+#
+# The archive key is "<os>-<arch>", matching OS_TYPE and ARCH_STR in install.jl.
+# "any" denotes an artefact that is not platform-specific: FastQC is a Java
+# program and cd-hit is distributed as source and compiled locally.
+
+schema_version: 1
+
+## Language runtimes
+# These track the committed lockfiles rather than leading them. Julia must match
+# julia_version in Manifest.toml; R must match R.Version in renv.lock. apt_version
+# is the CRAN noble-cran40 package revision used to pin R on Ubuntu 24.04 in CI,
+# and has no meaning off that platform.
+runtimes:
+  julia:
+    version: "1.12.5"
+  r:
+    version: "4.5.0"
+    apt_version: "4.5.0-3.2404.0"
+    bioconductor: "3.22"
+
+## Build toolchain
+# Build-time only, and deliberately kept apart from `runtimes`: bun compiles the
+# frontend and never touches a pipeline run, so it is not part of a run's
+# provenance and must not be probed as though it were. It is pinned here for the
+# same reason as everything else, so that CI cannot silently move.
+toolchain:
+  bun:
+    version: "1.3.10"
+
+## External tools
+tools:
+  # Installed from PyPI, so the pin is a version specifier rather than an archive;
+  # pip and pipx verify the wheel against PyPI's own hashes.
+  cutadapt:
+    version: "5.2"
+    source: pypi
+
+  multiqc:
+    version: "1.33"
+    source: pypi
+
+  # Babraham publish no release API, so the URL is constructed from the version
+  # and cannot be discovered. Bump both together.
+  fastqc:
+    version: "0.12.1"
+    source: archive
+    archives:
+      any:
+        url: "https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip"
+        sha256: "5f4dba8780231a25a6b8e11ab2c238601920c9704caa5458d9de559575d58aa7"
+
+  # No precompiled cd-hit binary is published for Linux, so the installer prefers
+  # the distribution package and falls back to compiling this source tarball. The
+  # checksum therefore pins the source, not the binary that comes out of it.
+  cd_hit_est:
+    version: "4.8.1"
+    source: source_archive
+    archives:
+      any:
+        url: "https://github.com/weizhongli/cdhit/releases/download/V4.8.1/cd-hit-v4.8.1-2019-0228.tar.gz"
+        sha256: "26172dba3040d1ae5c73ff0ac6c3be8c8e60cc49fc7379e434cdf9cb1e7415de"
+
+  vsearch:
+    version: "2.30.5"
+    source: archive
+    archives:
+      linux-x86_64:
+        url: "https://github.com/torognes/vsearch/releases/download/v2.30.5/vsearch-2.30.5-linux-x86_64.tar.gz"
+        sha256: "d6092a03b2e2b1655993c282834924cdd58c05cb4f2eeeeec1ad79ad19057b49"
+      linux-aarch64:
+        url: "https://github.com/torognes/vsearch/releases/download/v2.30.5/vsearch-2.30.5-linux-aarch64.tar.gz"
+        sha256: "57186958c9a5c5e61d8ae0ff7e990877569274b481c8a68622f69ce80da3462c"
+      macos-x86_64:
+        url: "https://github.com/torognes/vsearch/releases/download/v2.30.5/vsearch-2.30.5-macos-x86_64.tar.gz"
+        sha256: "afa7ffe7f7a9a7d515fe78f02445a00822c22279459170394949c4f175ba6984"
+      macos-aarch64:
+        url: "https://github.com/torognes/vsearch/releases/download/v2.30.5/vsearch-2.30.5-macos-aarch64.tar.gz"
+        sha256: "c62cb741c0124eac3823bf02e86c29f70c17e61a196f4d36134bbc120ebd79b0"
+
+  swarm:
+    version: "3.1.6"
+    source: archive
+    archives:
+      linux-x86_64:
+        url: "https://github.com/torognes/swarm/releases/download/v3.1.6/swarm-3.1.6-linux-x86_64.tar.gz"
+        sha256: "49ca536ef3dc709d053b9af6fa28b6b458c8b154e04b25e99d15473d4da4d568"
+      linux-aarch64:
+        url: "https://github.com/torognes/swarm/releases/download/v3.1.6/swarm-3.1.6-linux-aarch64.tar.gz"
+        sha256: "0dbe212b754e4e70b79dc642b7b1aae7a46b72e2f4a8549c8961da6bc0da0ee7"
+      macos-x86_64:
+        url: "https://github.com/torognes/swarm/releases/download/v3.1.6/swarm-3.1.6-macos-x86_64.tar.gz"
+        sha256: "33a9d041f3259cb3a47a4604bb7556c27e5b040c968b3dc22f9330b87eea04ef"
+      macos-aarch64:
+        url: "https://github.com/torognes/swarm/releases/download/v3.1.6/swarm-3.1.6-macos-aarch64.tar.gz"
+        sha256: "ec6a81b3d0693231d0283ad5fd360f2d3bda8918283d0ef01f1c8976d9c05896"

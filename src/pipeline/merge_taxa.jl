@@ -227,6 +227,11 @@ export merge_taxonomy_counts, filter_table, filter_table_dada2, merge_taxa, merg
             # Keep only SeqName and *_boot columns; drop Sequence (already in merged_df).
             boot_cols = filter(c -> c == "SeqName" || endswith(c, "_boot"), names(df_boot))
             select!(df_boot, boot_cols)
+            # A duplicated SeqName here fans the joined row out and multiplies that
+            # ASV's counts everywhere downstream, exactly as on the join above.
+            allunique(df_boot.SeqName) ||
+                error("merge_taxa: SeqName is not unique in bootstraps input " *
+                      "(duplicates: $(_first_duplicates(df_boot.SeqName)))")
             merged_df = leftjoin(merged_df, df_boot, on="SeqName")
             @info "Merge taxa: Joined $(length(boot_cols)-1) bootstrap columns from $bootstraps_path"
         end

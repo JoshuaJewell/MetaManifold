@@ -10,8 +10,9 @@
 #
 # Options:
 #   --update    Abort any in-progress merge, sync tracked files to origin/main,
-#               clean generated build artifacts, then update managed binaries
-#               in bin/
+#               clean generated build artifacts, then re-assert the pinned tool
+#               versions in bin/ (see config/defaults/tool_versions.yml). This
+#               re-fetches the pins; it does not advance them.
 #   --modify    Revisit configured tool paths instead of silently reusing them
 #   --sysimage  Pass through to install.jl to build the Julia sysimage
 

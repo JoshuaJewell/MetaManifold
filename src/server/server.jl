@@ -16,7 +16,7 @@ module Server
     using Oxygen, HTTP, JSON3, YAML, Logging
 
     using MetaManifold.PipelineTypes, MetaManifold.PipelineLog, MetaManifold.Config
-    using MetaManifold.Databases, MetaManifold.DuckDBStore
+    using MetaManifold.Databases, MetaManifold.DuckDBStore, MetaManifold.Validation
     using MetaManifold.FuncDBAnnotation
     using MetaManifold.Tools, MetaManifold.TaxonomyTableTools, MetaManifold.ProjectSetup
     using MetaManifold.DADA2, MetaManifold.OTUPipeline
@@ -85,6 +85,24 @@ module Server
     include(joinpath(@__DIR__, "routes", "events.jl"))
     include(joinpath(@__DIR__, "routes", "analysis.jl"))
     include(joinpath(@__DIR__, "routes", "composition.jl"))
+
+    ## R-runtime busy middleware
+    # The embedded R interpreter is shared between the pipeline and the analysis
+    # endpoints (see `RRuntime`). A pipeline run can hold it for hours, so an
+    # analysis waits only briefly and then throws `RBusyError` rather than hanging
+    # the response. Report that as a 503, matching the existing `r_unavailable`
+    # shape, so the frontend can tell the user to retry once the run completes.
+    function _r_busy_middleware(next)
+        function(req::HTTP.Request)
+            try
+                next(req)
+            catch e
+                e isa MetaManifold.RRuntime.RBusyError || rethrow()
+                json_error(503, "r_busy",
+                    "The R runtime is busy with a pipeline run - retry once it completes")
+            end
+        end
+    end
 
     ## CORS middleware (needed when the frontend is served from a different origin)
     function _cors_middleware(next)
@@ -183,7 +201,9 @@ module Server
         isempty(initialised) || @info "Initialised projects" initialised
 
         listen || return nothing
-        serve(; host, port, access_log=nothing, middleware=[_cors_middleware, _file_middleware], show_errors=false)
+        serve(; host, port, access_log=nothing,
+              middleware=[_r_busy_middleware, _cors_middleware, _file_middleware],
+              show_errors=false)
     end
 
 end

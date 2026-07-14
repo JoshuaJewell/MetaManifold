@@ -35,6 +35,11 @@ end
 end
 
 @delete "/api/v1/jobs/{id}" function(req, id::String)
-    cancel_job!(id) || return json_error(404, "job_not_found", "Job '$id' not found")
+    # Existence and cancellability are different questions. `cancel_job!` returns
+    # false when the job had already settled, which is not a 404: the job is there,
+    # there was simply nothing left to cancel. Deleting an already-finished job is
+    # idempotent and succeeds.
+    isnothing(get_job(id)) && return json_error(404, "job_not_found", "Job '$id' not found")
+    cancel_job!(id)
     HTTP.Response(204)
 end

@@ -4,12 +4,13 @@
 databases:
   dir: "./databases"
   pr2:
+    # Both formats MUST come from the same PR2 release; see config/defaults/databases.yml.
     dada2:
-      uri: "https://github.com/pr2database/pr2database/releases/download/v5.0.0/pr2_version_5.0.0_SSU_dada2.fasta.gz"
+      uri: "https://github.com/pr2database/pr2database/releases/download/v5.1.1/pr2_version_5.1.1_SSU_dada2.fasta.gz"
       local: ~
       remote_path: ~
     vsearch:
-      uri: "https://github.com/pr2database/pr2database/releases/download/v5.1.0.0/pr2_version_5.1.0_SSU_taxo_long.fasta.gz"
+      uri: "https://github.com/pr2database/pr2database/releases/download/v5.1.1/pr2_version_5.1.1_SSU_taxo_long.fasta.gz"
       local: ~
     levels:
       - Domain

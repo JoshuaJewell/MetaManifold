@@ -4,20 +4,40 @@
 # Routes: /api/v1/databases
 using JSON3, YAML
 
+# A format is present when its `local:` override names a file that exists, or when
+# the asset named by its `uri:` has been downloaded into the databases cache. The
+# config schema has no `local_path` key, only `uri`, `local`, and `remote_path`, so
+# reading `local_path` meant every database reported itself unavailable regardless
+# of what was actually on disk.
+function _format_available(entry::AbstractDict, format::String, db_dir::String)
+    info = get(entry, format, nothing)
+    info isa AbstractDict || return false
+
+    override = get(info, "local", nothing)
+    if !isnothing(override) && !isempty(string(override))
+        return isfile(string(override))
+    end
+
+    uri = get(info, "uri", nothing)
+    isnothing(uri) && return false
+    isfile(joinpath(db_dir, basename(string(uri))))
+end
+
 function _db_info()
     path = joinpath(dirname(ServerState.data_dir()), "config", "databases.yml")
     isfile(path) || return []
     cfg = get(YAML.load_file(path), "databases", Dict())
+    # The cache directory is `databases.dir`, exactly as `Databases.ensure_databases`
+    # resolves it. Hard-coding "databases/" here would report every database
+    # unavailable on any deployment that sets the key, while the pipeline resolved it
+    # perfectly well.
+    db_dir = abspath(get(cfg, "dir", "./databases"))
     map(filter(((k,v),) -> v isa Dict, collect(cfg))) do (key, entry)
-        name  = get(entry, "label", string(key))
-        dada2_path   = get(get(entry, "dada2",   Dict()), "local_path", nothing)
-        vsearch_path = get(get(entry, "vsearch", Dict()), "local_path", nothing)
-        db_dir = joinpath(dirname(ServerState.data_dir()), "databases")
         (;
             key     = string(key),
-            label   = name,
-            dada2_available   = !isnothing(dada2_path)   && isfile(joinpath(db_dir, basename(string(dada2_path)))),
-            vsearch_available = !isnothing(vsearch_path) && isfile(joinpath(db_dir, basename(string(vsearch_path)))),
+            label   = get(entry, "label", string(key)),
+            dada2_available   = _format_available(entry, "dada2",   db_dir),
+            vsearch_available = _format_available(entry, "vsearch", db_dir),
         )
     end
 end

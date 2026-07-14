@@ -148,7 +148,7 @@ end
     preset_file = get(body, :preset, nothing)
     isnothing(preset_file) && return json_error(400, "missing_preset", "Body must include 'preset'")
     preset_file = string(preset_file)
-    occursin(r"^[a-zA-Z0-9._-]+$", preset_file) || return json_error(400, "invalid_preset",
+    Validation.is_safe_name(preset_file) || return json_error(400, "invalid_preset",
         "Preset name must contain only letters, numbers, dots, hyphens, and underscores")
 
     filter_path = joinpath(_presets_dir(), preset_file)
@@ -284,7 +284,7 @@ end
 
 ## Save filters to config/presets/
 @post "/api/v1/filter-presets/{name}" function(req, name::String)
-    occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
+    Validation.is_safe_name(name) || return json_error(400, "invalid_name",
         "Filter name must contain only letters, numbers, dots, hyphens, and underscores")
 
     dir = _presets_dir()
@@ -350,7 +350,7 @@ end
     save_name = get(body, :name, nothing)
     isnothing(save_name) && return json_error(400, "missing_name", "Body must include 'name'")
     save_name = string(save_name)
-    occursin(r"^[a-zA-Z0-9._-]+$", save_name) || return json_error(400, "invalid_name",
+    Validation.is_safe_name(save_name) || return json_error(400, "invalid_name",
         "Name must contain only letters, numbers, dots, hyphens, and underscores")
 
     params = _body_filter_params(body)
@@ -425,7 +425,7 @@ end
 
 ## Delete a filter preset
 @delete "/api/v1/filter-presets/{name}" function(req, name::String)
-    occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
+    Validation.is_safe_name(name) || return json_error(400, "invalid_name",
         "Filter name must contain only letters, numbers, dots, hyphens, and underscores")
     filename = endswith(name, ".yml") ? name : name * ".yml"
     path = joinpath(_presets_dir(), filename)

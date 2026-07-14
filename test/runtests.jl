@@ -42,6 +42,11 @@ using MetaManifold.Categories, MetaManifold.CompositionLibrary
     include("unit/test_composition.jl")
     include("unit/test_composition_library.jl")
     include("unit/test_categories.jl")
+    include("unit/test_read_conservation.jl")
+    include("unit/test_r_runtime.jl")
+    include("unit/test_jobs.jl")
+    include("unit/test_provenance.jl")
+    include("unit/test_install_pins.jl")
     include("unit/test_migrate_composition.jl")
 
     ## Integration tests (opt-in)

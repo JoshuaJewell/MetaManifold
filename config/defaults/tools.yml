@@ -25,5 +25,8 @@ vsearch:
   # Remote example (vsearch on a compute server):
   # path: "user@bioserver:/home/user/software/vsearch"
 
+swarm:
+  path: null
+
 cd_hit_est:
   path: null

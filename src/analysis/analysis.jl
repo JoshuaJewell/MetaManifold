@@ -6,6 +6,7 @@ module Analysis
 using DataFrames, JSON3, DuckDB, DBInterface, RCall
 using ..DiversityMetrics: richness, shannon, simpson, normalise_counts,
                           auto_min_depth
+using ..RRuntime: with_r_lock, RBusyError
 
 export sample_columns, filtered_counts, filtered_df, taxonomy_levels, taxon_column,
        aggregate_by_taxon, combined_counts_across_runs, combined_asv_counts_across_runs,
@@ -174,6 +175,66 @@ function venn_taxa_present(con, table::String, sample_cols::Vector{String},
     String.(df.taxon)
 end
 
+## Cross-run combination
+# A sample is identified by (run, column name), never by the column name alone:
+# that name is unique only within its own run, so pooled runs that repeat a
+# sub-group prefix will share it. Accumulating on the bare name sums both runs'
+# reads together and then writes the pooled figure into both matrix rows,
+# doubling the reads that feed NMDS, PERMANOVA and the cross-run charts. Counts
+# are therefore accumulated per run and each row draws only from its own run.
+function _combined_across_runs(
+    run_data::Vector{Tuple{String, Vector{String}, DataFrame}},
+    key_of::Function,
+)
+    per_run_counts = Dict{String, Dict{String, Float64}}[]
+    all_samples = String[]
+    run_labels = String[]
+    sample_run = Int[]
+    feature_keys = Set{String}()
+
+    for (run_idx, (label, sample_cols, df)) in enumerate(run_data)
+        append!(all_samples, sample_cols)
+        append!(run_labels, fill(label, length(sample_cols)))
+        append!(sample_run, fill(run_idx, length(sample_cols)))
+        counts = Dict{String, Dict{String, Float64}}()
+        syms = Symbol.(sample_cols)
+        for row in eachrow(df)
+            feature = key_of(row)
+            push!(feature_keys, feature)
+            fd = get!(counts, feature, Dict{String, Float64}())
+            for (col, sym) in zip(sample_cols, syms)
+                v = row[sym]
+                fd[col] = get(fd, col, 0.0) + (ismissing(v) ? 0.0 : Float64(v))
+            end
+        end
+        push!(per_run_counts, counts)
+    end
+
+    feature_labels = sort(collect(feature_keys))
+    mat = zeros(Float64, length(all_samples), length(feature_labels))
+
+    # Walk the sparse per-run counts rather than the dense grid. A run's dict holds
+    # only its own features, so a cell-by-cell sweep would hash the feature key once
+    # per cell and miss on all but its own run's share. For ASV data the key is the
+    # whole DNA sequence, several hundred bytes, and the grid is mostly zero, which
+    # `mat` already is.
+    column_of = Dict{String,Int}(f => j for (j, f) in enumerate(feature_labels))
+    rows_of_run = [Int[] for _ in per_run_counts]
+    for (i, r) in enumerate(sample_run)
+        push!(rows_of_run[r], i)
+    end
+    for (r, counts) in enumerate(per_run_counts)
+        for (feature, fd) in counts
+            j = column_of[feature]
+            for i in rows_of_run[r]
+                mat[i, j] = get(fd, all_samples[i], 0.0)
+            end
+        end
+    end
+
+    mat, all_samples, feature_labels, run_labels
+end
+
 """
     combined_counts_across_runs(run_data) -> (Matrix{Float64}, Vector{String}, Vector{String}, Vector{String})
 
@@ -181,40 +242,13 @@ Build a combined taxonomy-aggregated count matrix across multiple runs for NMDS/
 `run_data` is a vector of `(label, sample_cols, taxon_counts_df)` tuples.
 
 Returns (matrix, all_sample_names, taxon_labels, run_labels_per_sample).
+`all_sample_names` and `run_labels_per_sample` are parallel, one entry per matrix
+row, and a sample name may legitimately repeat across runs.
 """
 function combined_counts_across_runs(
     run_data::Vector{Tuple{String, Vector{String}, DataFrame}}
 )
-    taxa_counts = Dict{String, Dict{String, Float64}}()
-    all_samples = String[]
-    run_labels = String[]
-
-    for (label, sample_cols, df) in run_data
-        append!(all_samples, sample_cols)
-        append!(run_labels, fill(label, length(sample_cols)))
-        for row in eachrow(df)
-            taxon = string(row.taxon)
-            td = get!(taxa_counts, taxon, Dict{String, Float64}())
-            for col in sample_cols
-                v = row[Symbol(col)]
-                td[col] = get(td, col, 0.0) + (ismissing(v) ? 0.0 : Float64(v))
-            end
-        end
-    end
-
-    taxa_labels = sort(collect(keys(taxa_counts)))
-    n_samples = length(all_samples)
-    n_taxa = length(taxa_labels)
-    mat = zeros(Float64, n_samples, n_taxa)
-
-    for (j, taxon) in enumerate(taxa_labels)
-        td = taxa_counts[taxon]
-        for (i, sample) in enumerate(all_samples)
-            mat[i, j] = get(td, sample, 0.0)
-        end
-    end
-
-    mat, all_samples, taxa_labels, run_labels
+    _combined_across_runs(run_data, row -> string(row.taxon))
 end
 
 """
@@ -232,36 +266,7 @@ Returns (matrix, all_sample_names, sequence_labels, run_labels_per_sample).
 function combined_asv_counts_across_runs(
     run_data::Vector{Tuple{String, Vector{String}, DataFrame}}
 )
-    seq_counts = Dict{String, Dict{String, Float64}}()
-    all_samples = String[]
-    run_labels = String[]
-
-    for (label, sample_cols, df) in run_data
-        append!(all_samples, sample_cols)
-        append!(run_labels, fill(label, length(sample_cols)))
-        for row in eachrow(df)
-            seq = string(row[:sequence])
-            sd = get!(seq_counts, seq, Dict{String, Float64}())
-            for col in sample_cols
-                v = row[Symbol(col)]
-                sd[col] = get(sd, col, 0.0) + (ismissing(v) ? 0.0 : Float64(v))
-            end
-        end
-    end
-
-    seq_labels = sort(collect(keys(seq_counts)))
-    n_samples = length(all_samples)
-    n_seqs = length(seq_labels)
-    mat = zeros(Float64, n_samples, n_seqs)
-
-    for (j, seq) in enumerate(seq_labels)
-        sd = seq_counts[seq]
-        for (i, sample) in enumerate(all_samples)
-            mat[i, j] = get(sd, sample, 0.0)
-        end
-    end
-
-    mat, all_samples, seq_labels, run_labels
+    _combined_across_runs(run_data, row -> string(row[:sequence]))
 end
 
 ## Plotly chart builders
@@ -555,13 +560,32 @@ function _paired_metric_map(sample_ids::Vector{String}, values::Vector{Float64})
     Dict(k => sum(v) / length(v) for (k, v) in buckets)
 end
 
+_no_significance() = (nothing, DataFrame(group1=String[], group2=String[], p=Float64[]))
+
+# A boxplot is worth drawing even without its significance annotations, so when a
+# pipeline run is holding the R runtime we degrade to an unannotated chart rather
+# than failing the whole request.
 function _alpha_significance(values::Vector{Float64},
                              labels::Vector{String},
                              sample_ids::Vector{String};
                              pairwise::Bool=false,
                              paired_samples::Bool=false)
-    _ensure_r() || return nothing, DataFrame(group1=String[], group2=String[], p=Float64[])
-    lock(_r_lock) do
+    try
+        _ensure_r() || return _no_significance()
+        _alpha_significance_r(values, labels, sample_ids; pairwise, paired_samples)
+    catch e
+        e isa RBusyError || rethrow()
+        @warn "Alpha significance skipped: the R runtime is busy with a pipeline run"
+        _no_significance()
+    end
+end
+
+function _alpha_significance_r(values::Vector{Float64},
+                               labels::Vector{String},
+                               sample_ids::Vector{String};
+                               pairwise::Bool=false,
+                               paired_samples::Bool=false)
+    with_r_lock(; timeout=R_WAIT_SECONDS[]) do
         if paired_samples
             groups_u = unique(labels)
             paired_maps = Dict(label => _paired_metric_map(
@@ -884,12 +908,16 @@ function nmds_chart(coords::Matrix{Float64}, labels::Vector{String};
 end
 
 ## NMDS and PERMANOVA
-const _r_lock = ReentrantLock()
+# The R runtime itself is shared with the pipeline; see `RRuntime`. An analysis
+# serves an interactive request, so it waits only this long (in seconds) for a
+# pipeline run to release the interpreter before giving up with an `RBusyError`.
+const R_WAIT_SECONDS = Ref(10.0)
+
 const _r_loaded = Ref(false)
 
 function _ensure_r()
     _r_loaded[] && return true
-    lock(_r_lock) do
+    with_r_lock(; timeout=R_WAIT_SECONDS[]) do
         _r_loaded[] && return true
         try
             RCall.reval("suppressPackageStartupMessages(library(vegan))")
@@ -912,7 +940,7 @@ NMDS via vegan::metaMDS with Bray-Curtis distance.
 """
 function run_nmds(mat::Matrix{Float64}; seed::Integer=123)
     _ensure_r() || return (fill(NaN, size(mat, 1), 2), NaN)
-    lock(_r_lock) do
+    with_r_lock(; timeout=R_WAIT_SECONDS[]) do
         RCall.globalEnv[:mat] = mat
         RCall.globalEnv[:seed] = Int(seed)
         RCall.reval("""
@@ -950,7 +978,7 @@ function run_permanova(mat::Matrix{Float64}, metadata::DataFrame; seed::Integer=
     isempty(covariates) && return nothing
     formula_rhs = join(covariates, " + ")
 
-    lock(_r_lock) do
+    with_r_lock(; timeout=R_WAIT_SECONDS[]) do
         meta_r = copy(metadata)
         RCall.globalEnv[:mat] = mat
         RCall.globalEnv[:meta_r] = meta_r

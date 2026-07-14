@@ -137,7 +137,10 @@ function _contamination_stats_from_df(df::DataFrame, count_cols::Vector{String})
                   sum(count_cols) do col
                       sum(coalesce.(df[mask, col], 0))
                   end
-        tally[status] = (; rows=n_rows, reads=Int(coalesce(n_reads, 0)))
+        # `_sample_count_columns` now delegates to `Analysis.sample_columns`, which
+        # admits DOUBLE-typed sample columns as well as integer ones. A bare
+        # `Int(...)` would throw an InexactError on any fractional tally, so round.
+        tally[status] = (; rows=n_rows, reads=round(Int, coalesce(n_reads, 0)))
     end
     total_rows  = sum(v.rows  for v in values(tally))
     total_reads = sum(v.reads for v in values(tally))
@@ -335,6 +338,14 @@ function _generate_annotation!(study::String, run::String, source::String, table
                         rename!(edits, "Contamination" => "_old_Contamination")
                     BLAST_ASSIGNMENT_COLUMN in names(edits) &&
                         rename!(edits, BLAST_ASSIGNMENT_COLUMN => "_old_BLAST")
+                    # `annotated_df` carries the sample count columns, so a duplicated
+                    # sequence in the curation CSV would fan its row out and multiply
+                    # its reads, and the result is written back, compounding on every
+                    # round trip. This is the same hazard the merge_taxa joins guard
+                    # against; the join key must be unique on the right-hand side.
+                    allunique(edits[!, seq_col]) ||
+                        error("annotations: '$seq_col' is not unique in the existing " *
+                              "annotation table; refusing to join and inflate read counts")
                     merged = leftjoin(annotated_df, edits; on=seq_col)
                     if "_old_Contamination" in names(merged)
                         for i in 1:nrow(merged)

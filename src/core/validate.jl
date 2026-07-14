@@ -5,11 +5,22 @@ module Validation
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 export validate_environment, validate_project, ValidationError,
-       DENOVO_METHODS
+       DENOVO_METHODS, SAFE_NAME_RE, is_safe_name
 
     using YAML, Logging
     using ..PipelineTypes
     using ..Config
+
+    ## Safe names
+    # The one guard for every user-supplied name that reaches a filesystem path or a
+    # quoted SQL identifier: study, run, preset, filter, and category-set names.
+    # It lived in nine places across four modules and had to be corrected in each by
+    # hand, which is precisely how such a guard rots into an injection or traversal
+    # hole. Note `\z`, not `$`: PCRE's `$` also matches before a trailing newline, so
+    # `"evil\n"` satisfied the old spelling.
+    const SAFE_NAME_RE = r"\A[A-Za-z0-9._-]+\z"
+
+    is_safe_name(s::AbstractString) = occursin(SAFE_NAME_RE, s)
 
     # Allowed chimera detection methods accepted by DADA2's removeBimeraDenovo.
     # Kept here so configuration validation and the call-site guard in

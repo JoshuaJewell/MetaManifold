@@ -17,8 +17,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ["1"]   # latest stable (Manifest.toml is version-pinned)
-        os: [ubuntu-latest]
+        # Pinned rather than tracking latest stable, because a pinned Manifest.toml
+        # resolved by an unpinned Julia is not a reproducible build. This must equal
+        # julia_version in Manifest.toml; it cannot be read from the pin file, since
+        # nothing can be read before Julia exists. test/unit/test_install_pins.jl
+        # fails if the three ever disagree.
+        julia-version: ["1.12.5"]
+        # Explicit, not ubuntu-latest: the R pin below names an apt package revision
+        # built for 24.04, and a runner that silently rolled to the next LTS would
+        # take that pin with it.
+        os: [ubuntu-24.04]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,9 +39,36 @@ jobs:
       - name: Cache Julia packages
         uses: julia-actions/cache@v2
 
+      # Every external version CI installs is read from the committed pin file, so CI
+      # and a developer's machine cannot drift apart. A temporary environment is used
+      # because the project environment cannot be instantiated until R is present:
+      # RCall's build step requires it.
+      - name: Read pinned versions
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(temp = true)
+            Pkg.add("YAML")
+            using YAML
+            pins = YAML.load_file("config/defaults/tool_versions.yml")
+            open(ENV["GITHUB_ENV"], "a") do io
+                println(io, "R_APT_VERSION=", pins["runtimes"]["r"]["apt_version"])
+                println(io, "BUN_VERSION=", pins["toolchain"]["bun"]["version"])
+                println(io, "CUTADAPT_SPEC=cutadapt==", pins["tools"]["cutadapt"]["version"])
+                for tool in ("vsearch", "swarm")
+                    archive = pins["tools"][tool]["archives"]["linux-x86_64"]
+                    println(io, uppercase(tool), "_VERSION=", pins["tools"][tool]["version"])
+                    println(io, uppercase(tool), "_URL=", archive["url"])
+                    println(io, uppercase(tool), "_SHA256=", archive["sha256"])
+                end
+            end'
+
       # R + required packages (needed by RCall)
       # Install R directly via apt to avoid r-lib/actions/setup-r mangling
       # R_HOME and stripping default packages (utils, methods, stats, etc.)
+      # The version is pinned to the apt revision named in the pin file, which tracks
+      # R.Version in renv.lock; CRAN's Ubuntu repository retains older revisions, so
+      # this resolves rather than merely requesting the newest.
       - name: Set up R
         run: |
           wget -qO- https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
@@ -41,7 +76,13 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/r-project.gpg] https://cloud.r-project.org/bin/linux/ubuntu $(lsb_release -cs)-cran40/" \
             | sudo tee /etc/apt/sources.list.d/r-project.list
           sudo apt-get update -qq
-          sudo apt-get install -y r-base r-base-dev
+          sudo apt-get install -y \
+            r-base-core="$R_APT_VERSION" \
+            r-base-dev="$R_APT_VERSION" \
+            r-base-html="$R_APT_VERSION" \
+            r-recommended="$R_APT_VERSION" \
+            r-base="$R_APT_VERSION"
+          Rscript -e 'cat(R.version.string, "\n")'
 
       - name: Install R system dependencies
         run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
@@ -54,21 +95,32 @@ jobs:
           Rscript -e 'for (pkg in c("dada2","vegan","dplyr")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
 
       - name: Install cutadapt
-        run: pip install cutadapt
+        run: pip install "$CUTADAPT_SPEC"
 
+      # The one tool CI does not pin. Ubuntu ships no versioned cd-hit revision worth
+      # naming, and 24.04 is frozen, so its cd-hit does not move under us; the version
+      # that arrives is recorded at preflight, where a discrepancy is visible.
       - name: Install cd-hit
         run: sudo apt-get install -y cd-hit
 
-      - name: Install vsearch 2.29.2
+      # Downloaded against the pinned URL and refused unless it hashes to the pinned
+      # SHA256, so CI runs the same bytes install.jl puts on a developer's machine.
+      - name: Install vsearch
         run: |
-          curl -sSL "https://github.com/torognes/vsearch/releases/download/v2.29.2/vsearch-2.29.2-linux-x86_64.tar.gz" | tar xz
-          sudo mv vsearch-2.29.2-linux-x86_64/bin/vsearch /usr/local/bin/vsearch
+          curl -sSL -o vsearch.tar.gz "$VSEARCH_URL"
+          echo "$VSEARCH_SHA256  vsearch.tar.gz" | sha256sum -c -
+          tar xzf vsearch.tar.gz --warning=no-unknown-keyword
+          sudo mv "vsearch-$VSEARCH_VERSION-linux-x86_64/bin/vsearch" /usr/local/bin/vsearch
+          rm -rf vsearch.tar.gz "vsearch-$VSEARCH_VERSION-linux-x86_64"
           vsearch --version
 
-      - name: Install swarm 3.1.5
+      - name: Install swarm
         run: |
-          curl -sSL "https://github.com/torognes/swarm/releases/download/v3.1.5/swarm-3.1.5-linux-x86_64.tar.gz" | tar xz
-          sudo mv swarm-3.1.5-linux-x86_64/bin/swarm /usr/local/bin/swarm
+          curl -sSL -o swarm.tar.gz "$SWARM_URL"
+          echo "$SWARM_SHA256  swarm.tar.gz" | sha256sum -c -
+          tar xzf swarm.tar.gz --warning=no-unknown-keyword
+          sudo mv "swarm-$SWARM_VERSION-linux-x86_64/bin/swarm" /usr/local/bin/swarm
+          rm -rf swarm.tar.gz "swarm-$SWARM_VERSION-linux-x86_64"
           swarm --version
 
       - name: Instantiate Julia project
@@ -77,7 +129,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Build frontend
         working-directory: frontend

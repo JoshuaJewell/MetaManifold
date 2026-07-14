@@ -118,4 +118,44 @@ databases:
         rm(dir; recursive=true)
     end
 
+    ## Every format of one logical database must be drawn from the SAME upstream
+    # release. The dual-classifier consensus
+    # (FuncDBAnnotation._compute_consensus_rank) compares the DADA2 and VSEARCH
+    # labels for string equality, so references from different releases score
+    # genuine agreements as disagreements. The shipped defaults once pinned DADA2
+    # to PR2 5.0.0 and VSEARCH to 5.1.0; 5.1.0 alone retaxonomised 7375 annotated
+    # entries and switched species names from underscores to hyphens.
+    @testset "database formats share one upstream release" begin
+        # The release as the artefact itself declares it: PR2 names its assets
+        # `pr2_version_<release>_SSU_<format>.fasta.gz`. The release tag is not
+        # authoritative (tag `v5.1.0.0` carries assets named `5.1.0`).
+        function _declared_release(uri::AbstractString)
+            m = match(r"_version_([0-9]+(?:\.[0-9]+)*)_", basename(uri))
+            isnothing(m) ? nothing : m.captures[1]
+        end
+
+        # Formats that name a reference artefact. `levels`, `corrections`, and
+        # `vsearch_format` are metadata, not downloads.
+        format_keys = ("dada2", "vsearch")
+
+        for cfg_path in ("config/defaults/databases.yml", "config/ci/databases.yml")
+            cfg = YAML.load_file(joinpath(@__DIR__, "..", "..", cfg_path))
+            for (db_name, entry) in get(cfg, "databases", Dict())
+                entry isa Dict || continue   # skips the scalar `dir:` key
+                releases = Dict{String,String}()
+                for fmt in format_keys
+                    fmt_cfg = get(entry, fmt, nothing)
+                    fmt_cfg isa Dict || continue
+                    uri = get(fmt_cfg, "uri", nothing)
+                    isnothing(uri) && continue
+                    rel = _declared_release(string(uri))
+                    isnothing(rel) && continue
+                    releases[fmt] = rel
+                end
+                isempty(releases) && continue
+                @test length(unique(values(releases))) == 1
+            end
+        end
+    end
+
 end

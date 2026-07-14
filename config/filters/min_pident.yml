@@ -1,6 +1,0 @@
-# Saved from table merged
-
-filters:
-  - column: "Pident"
-    type: min
-    value: 80

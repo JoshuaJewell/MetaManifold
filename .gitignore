@@ -302,6 +302,10 @@ config/tools.yml
 config/pipeline.yml
 config/databases.yml
 config/primers.yml
+config/composition.yml
+
+# Migration backups written by scripts/migrate_composition.jl
+config/backup-*/
 
 ### Bits I don't want to share yet
 hide.*

@@ -10,6 +10,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
     using SHA
     using CSV
     using DataFrames
+    using Dates
     using Logging
     using ..PipelineTypes
     using ..PipelineLog
@@ -17,9 +18,31 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
 
     _sq(s::AbstractString) = "'" * replace(s, "'" => "'\\''") * "'"
 
-    function _run_logged(cmd_str::String, log_path::String; mode::String="w")
+    ## Command capture
+    # A tool's stdout records what it said, never what it was asked. The resolved
+    # command line, optional_args and all, is the only witness to the latter, so it
+    # goes into the log before the tool runs and survives even a crash. The marker
+    # is fixed so that `grep '^\[MetaManifold\] cmd: '` recovers every command a run
+    # issued, and it sits without collision beside the command line cd-hit
+    # volunteers into its own log.
+    const _CMD_MARKER = "[MetaManifold]"
+
+    function _log_command(cmd_str::AbstractString, log_path::AbstractString)
+        open(log_path, "a") do io
+            println(io, _CMD_MARKER, " command at ",
+                    Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
+            println(io, _CMD_MARKER, " cmd: ", cmd_str)
+        end
+    end
+
+    # Appends, never truncates: a stage that issues several commands must not have
+    # each one destroy its predecessor's record. Truncation is the stage's own
+    # affair, done once at entry via PipelineLog.reset_tool_logs.
+    function _run_logged(cmd_str::String, log_path::String)
+        mkpath(dirname(log_path))
+        _log_command(cmd_str, log_path)
         try
-            open(log_path, mode) do io
+            open(log_path, "a") do io
                 run(pipeline(`bash -lc $cmd_str`; stdout=io, stderr=io))
             end
         catch e
@@ -206,10 +229,15 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         log_dir          = joinpath(cutadapt_dir, "logs")
         stats_path       = joinpath(log_dir, "cutadapt_primer_trimming_stats.txt")
         summary_path     = joinpath(log_dir, "cutadapt_trimmed_percentage.txt")
+        cmd_log          = joinpath(log_dir, "cutadapt.log")
         stats_basename   = basename(stats_path)
         summary_basename = basename(summary_path)
 
-        isdir(log_dir) || mkpath(log_dir)
+        # Commands go to their own log rather than into the stats file: the summary
+        # step greps the latter for "passing" and "filtered", and a command line
+        # carrying either word in a path would misalign the columns it pastes.
+        # The stage owns truncation, since every write below only appends.
+        reset_tool_logs(stats_path, cmd_log)
 
         # Sample name = everything before the first occurrence of the R1/R2 suffix
         # in the *output-safe* name (which carries the sub-group prefix when pooled).
@@ -256,6 +284,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
                 cutadapt_cmd = "$cutadapt_bin $primer_args $optional_args -o $(_sq(outputR2)) $(_sq(inputR2))"
             end
 
+            _log_command(cutadapt_cmd, cmd_log)
             try
                 open(stats_path, "a") do io
                     run(pipeline(`bash -lc $cutadapt_cmd`; stdout=io, stderr=io))
@@ -272,6 +301,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
             "<(grep \"filtered\" $(_sq(stats_basename)) | cut -f3 -d \"(\" | tr -d \")\") " *
             "> $(_sq(summary_basename))"
 
+        _log_command(cmd, cmd_log)
         cd(log_dir) do
             run(pipeline(`bash -lc $cmd`))
         end
@@ -487,6 +517,10 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
 
         fastqc_log  = joinpath(log_dir, "fastqc.log")
         multiqc_log = joinpath(log_dir, "multiqc.log")
+        # FastQC is invoked once per FASTQ and appends throughout; the stage clears
+        # both logs here so that a re-run starts clean without any single command
+        # clobbering the record of the one before it.
+        reset_tool_logs(fastqc_log, multiqc_log)
 
         # Collect absolute paths from all input directories.
         all_fastqs = String[]
@@ -506,7 +540,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         for (i, fpath) in enumerate(all_fastqs)
             @info "FastQC: File $i/$nfiles - $(basename(fpath))"
             fqc_cmd = "$fastqc_bin $(_sq(fpath)) -o $(_sq(fastqc_dir)) $fastqc_args"
-            _run_logged(fqc_cmd, fastqc_log; mode = i == 1 ? "w" : "a")
+            _run_logged(fqc_cmd, fastqc_log)
         end
         @info "FastQC: Complete. Output: $fastqc_dir  Log: $fastqc_log"
 
@@ -571,6 +605,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         mkpath(log_dir)
         outfile  = joinpath(vsearch_dir, "taxonomy.tsv")
         log_path = joinpath(log_dir, "vsearch.log")
+        reset_tool_logs(log_path)
         @info "VSEARCH: Running $fasta_in_dir against $(basename(reference_database))"
         # --userout with query+target+id captures the full FASTA header (including
         # description after the space), unlike --blast6out which truncates at the first space.
@@ -734,6 +769,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
         mkpath(log_dir)
         fasta_out = joinpath(cdhit_dir, basename(fasta_in))
         log_path  = joinpath(log_dir, "cdhit.log")
+        reset_tool_logs(log_path)
         @info "CD-HIT: Running on $fasta_in"
         cmd = "$cdhit_bin -i $(_sq(fasta_in)) -o $(_sq(fasta_out)) $optional_args"
         _run_logged(cmd, log_path)
