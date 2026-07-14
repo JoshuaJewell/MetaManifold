@@ -10,6 +10,7 @@
         write(joinpath(config_dir, "defaults", "databases.yml"), "databases:\n  dir: ./databases\n")
         write(joinpath(config_dir, "defaults", "tools.yml"), "cutadapt: cutadapt\n")
         write(joinpath(config_dir, "defaults", "primers.yml"), "Forward: {}\nReverse: {}\nPairs: []\n")
+        write(joinpath(config_dir, "defaults", "composition.yml"), "filters: {}\nsets: {}\n")
 
         # Create data with two runs
         run_a = joinpath(dir, "data", "MyStudy", "run_A")
@@ -40,6 +41,9 @@
         @test isfile(joinpath(config_dir, "databases.yml"))
         @test isfile(joinpath(config_dir, "tools.yml"))
         @test isfile(joinpath(config_dir, "primers.yml"))
+        # The composition library must reproduce from a clean checkout, or a
+        # fresh install would start with no category sets at all.
+        @test isfile(joinpath(config_dir, "composition.yml"))
 
         rm(dir; recursive=true)
     end
@@ -52,6 +56,7 @@
         write(joinpath(config_dir, "defaults", "databases.yml"), "databases:\n  dir: ./databases\n")
         write(joinpath(config_dir, "defaults", "tools.yml"), "cutadapt: cutadapt\n")
         write(joinpath(config_dir, "defaults", "primers.yml"), "Forward: {}\nReverse: {}\nPairs: []\n")
+        write(joinpath(config_dir, "defaults", "composition.yml"), "filters: {}\nsets: {}\n")
 
         study = joinpath(dir, "data", "FlatStudy")
         mkpath(study)
@@ -86,6 +91,7 @@
         write(joinpath(config_dir, "defaults", "databases.yml"), "databases:\n  dir: ./databases\n")
         write(joinpath(config_dir, "defaults", "tools.yml"), "cutadapt: cutadapt\n")
         write(joinpath(config_dir, "defaults", "primers.yml"), "Forward: {}\nReverse: {}\nPairs: []\n")
+        write(joinpath(config_dir, "defaults", "composition.yml"), "filters: {}\nsets: {}\n")
 
         mkpath(joinpath(dir, "data", "EmptyStudy"))
 
@@ -105,6 +111,7 @@
         write(joinpath(config_dir, "defaults", "databases.yml"), "databases:\n  dir: ./databases\n")
         write(joinpath(config_dir, "defaults", "tools.yml"), "cutadapt: cutadapt\n")
         write(joinpath(config_dir, "defaults", "primers.yml"), "Forward: {}\nReverse: {}\nPairs: []\n")
+        write(joinpath(config_dir, "defaults", "composition.yml"), "filters: {}\nsets: {}\n")
 
         run_dir = joinpath(dir, "data", "Study", "run")
         mkpath(run_dir)
@@ -133,6 +140,7 @@
         write(joinpath(config_dir, "defaults", "databases.yml"), "databases:\n  dir: ./databases\n")
         write(joinpath(config_dir, "defaults", "tools.yml"), "cutadapt: cutadapt\n")
         write(joinpath(config_dir, "defaults", "primers.yml"), "Forward: {}\nReverse: {}\nPairs: []\n")
+        write(joinpath(config_dir, "defaults", "composition.yml"), "filters: {}\nsets: {}\n")
 
         # study/group_A/run1, study/group_B/run2
         for (group, run) in [("group_A", "run1"), ("group_B", "run2")]

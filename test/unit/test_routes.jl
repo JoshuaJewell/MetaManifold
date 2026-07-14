@@ -310,12 +310,11 @@ SV = Main.Server
         end
 
         ## Category happy path: write "default" category column, then call _chart_data.
-        # Uses the real compositions + filters dirs so the "default" set is resolved.
-        comps_dir = joinpath(@__DIR__, "..", "..", "config", "compositions")
-        flt_dir   = joinpath(@__DIR__, "..", "..", "config", "filters")
-        SV.Categories.write_category_columns!(con, "merged", "VSEARCH", ["default"];
-                                              compositions_dir=comps_dir,
-                                              filters_dir=flt_dir)
+        # Loads the real shipped composition library so the "default" set is
+        # resolved exactly as it is in production.
+        lib_path = joinpath(@__DIR__, "..", "..", "config", "composition.yml")
+        library = SV.CompositionLibrary.load(lib_path)
+        SV.Categories.write_category_columns!(con, "merged", "VSEARCH", ["default"]; library)
         columns_after = SV._duckdb_columns(con, "merged")
         # _chart_data with tag=category, value="default"; ensure_columns! is now a no-op.
         res_cat = SV._chart_data(con, "merged", columns_after, all_scols,
@@ -352,6 +351,114 @@ SV = Main.Server
         @test SV._parse_apply_to(String[]; set="s", category="c") == Set{String}()
         # The known-surface vocabulary is exactly these four.
         @test SV._EXCLUSION_SURFACES == Set(["diversity", "taxa", "composition", "venn"])
+    end
+
+    ## CRITICAL 1 regression guard: an exclusion spec against a library-defined
+    ## set must actually produce a dropping condition. Before the fix, the
+    ## set's categories were read from the (mismatched) directory while its
+    ## filters came from the library, so `category_case_when(...; strict=true)`
+    ## always returned `nothing` and every exclusion was silently skipped.
+    @testset "_exclusion_conditions resolves a library-defined set (CRITICAL 1 guard)" begin
+        tmp = mktempdir()
+        try
+            SV.ServerState.set_root!(tmp)
+            study, run = "studyX", "runX"
+            mkpath(joinpath(tmp, "data", study, run))
+            write(joinpath(tmp, "data", study, run, "pipeline.yml"), """
+            analysis:
+              exclude_categories:
+                - set: host
+                  category: Host
+            """)
+            mkpath(joinpath(tmp, "config"))
+            write(joinpath(tmp, "config", "composition.yml"), """
+            filters:
+              host_filter:
+                filters:
+                  - { column: Class, pattern: Craniata, action: keep }
+            sets:
+              host:
+                label: Host test
+                categories:
+                  - { name: Host, filter: host_filter }
+                  - { name: NotHost }
+            """)
+
+            columns = ["SeqName", "Class", "A_s1"]
+            conds = SV._exclusion_conditions(study, run, nothing, columns; surface="diversity")
+            @test !isempty(conds)
+            @test occursin("'Host'", conds[1])
+        finally
+            rm(tmp; recursive=true, force=true)
+        end
+    end
+
+    ## composition.jl: filter-level and whole-library routes (Task 6)
+    @testset "composition library routes" begin
+        tmp = mktempdir()
+        try
+            SV.ServerState.set_root!(tmp)
+            mkpath(joinpath(tmp, "config"))
+            write(joinpath(tmp, "config", "composition.yml"), """
+            filters:
+              bacteria:
+                filters:
+                  - { column: Domain, pattern: Bacteria, action: keep }
+            sets:
+              default:
+                label: Default
+                categories:
+                  - { name: Bacteria, colour: "#8e44ad", filter: bacteria }
+            """)
+
+            ## GET returns both sections.
+            lib = SV._library()
+            @test haskey(lib, "filters")
+            @test haskey(lib, "sets")
+            @test haskey(lib["filters"], "bacteria")
+            @test haskey(lib["sets"], "default")
+
+            ## POST a filter, then GET: it is there.
+            saved = SV._save_filter("fungi",
+                Dict("filters" => [Dict("column" => "Domain", "pattern" => "Fungi", "action" => "keep")]))
+            @test saved isa AbstractDict
+            @test haskey(SV._library()["filters"], "fungi")
+
+            ## POST a set naming a non-existent filter is rejected (the dangling guard).
+            bad = SV._save_composition_set("ghosted", Dict(
+                "label"      => "Ghosted",
+                "categories" => [Dict("name" => "Ghost", "filter" => "no_such_filter")],
+            ))
+            @test bad isa SV.HTTP.Response
+            @test bad.status == 400
+            @test JSON3.read(String(bad.body))["error"] == "invalid_library"
+            @test !haskey(SV._library()["sets"], "ghosted")
+
+            ## DELETE a filter that a set still references: 409, naming the set.
+            in_use = SV._delete_filter("bacteria")
+            @test in_use isa SV.HTTP.Response
+            @test in_use.status == 409
+            body_in_use = JSON3.read(String(in_use.body))
+            @test body_in_use["error"] == "filter_in_use"
+            @test occursin("default", body_in_use["message"])
+            @test haskey(SV._library()["filters"], "bacteria")
+
+            ## DELETE the `default` set is protected.
+            protected = SV._delete_category_set("default")
+            @test protected isa SV.HTTP.Response
+            @test protected.status == 400
+            @test JSON3.read(String(protected.body))["error"] == "protected_set"
+            @test haskey(SV._library()["sets"], "default")
+
+            ## POST a filter, then DELETE it (unreferenced): succeeds, gone from GET.
+            SV._save_filter("unused", Dict("filters" => Any[]))
+            @test haskey(SV._library()["filters"], "unused")
+            deleted = SV._delete_filter("unused")
+            @test deleted == "unused"
+            @test !haskey(SV._library()["filters"], "unused")
+        finally
+            rm(tmp; recursive=true, force=true)
+        end
     end
 
 end

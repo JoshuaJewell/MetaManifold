@@ -99,7 +99,7 @@ export new_project
         isdir(root_data) || error("Data directory not found: $root_data")
 
         # Standalone configs (not cascade-merged) - copy from defaults if missing
-        for fname in ("databases.yml", "tools.yml", "primers.yml")
+        for fname in ("databases.yml", "tools.yml", "primers.yml", "composition.yml")
             dst = joinpath(config_dir, fname)
             if !isfile(dst)
                 src = joinpath(defaults_dir, fname)

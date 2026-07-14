@@ -11,7 +11,7 @@ using MetaManifold.Analysis: alpha_chart, pipeline_stats_chart,
                              alpha_boxplot, nmds_chart, run_nmds, run_permanova, r_available,
                              sequence_column_name, normalise_counts, venn_taxa_present,
                              pool_columns, auto_min_depth, bar_chart
-using MetaManifold.Categories
+using MetaManifold.Categories, MetaManifold.CompositionLibrary
 
 function _validate_run_request(study::String, run::String)
     study in _study_names() || return json_error(404, "study_not_found",
@@ -75,15 +75,43 @@ end
 
 ## Unified chart helpers
 
-# Resolve compositions dir without depending on composition.jl (loaded after this file).
-_chart_compositions_dir() =
-    joinpath(dirname(ServerState.projects_dir()), "config", "compositions")
+# Resolve the composition library without depending on composition.jl (loaded
+# after this file).
+#
+# A single chart request reads the library from three points (row exclusions,
+# the Category__ backfill, and the legend colours), and the cross-run chart does
+# so once per run, so parsing the YAML afresh at each was 2N+1 parses of one
+# small file per figure. The parse is memoised on the file's exact bytes: the
+# read still happens on every call, but the read is not the cost, and the key
+# cannot go stale. An (mtime, size) key would be cheaper still and is what one
+# reaches for first, but it is unsound here: `mtime` is quantised coarsely
+# enough that two writes in quick succession share a timestamp, and a same-size
+# edit would then be served from the cache. A figure rendered against a
+# superseded category set is wrong in a way nothing downstream would catch, so
+# the key is the content itself.
+#
+# Readers must treat the returned Dict as immutable, since they now share one;
+# every mutating path goes through composition.jl's `_library`, which parses
+# its own copy.
+const _CHART_LIB_LOCK  = ReentrantLock()
+const _CHART_LIB_CACHE = Ref{Tuple{String,Vector{UInt8},Dict}}(("", UInt8[], Dict{String,Any}()))
+
+function _chart_library()
+    path  = joinpath(dirname(ServerState.projects_dir()), "config", "composition.yml")
+    bytes = isfile(path) ? read(path) : UInt8[]
+    lock(_CHART_LIB_LOCK) do
+        cached_path, cached_bytes, cached_lib = _CHART_LIB_CACHE[]
+        (cached_path == path && cached_bytes == bytes) && return cached_lib
+        lib = CompositionLibrary.load(path)
+        _CHART_LIB_CACHE[] = (path, bytes, lib)
+        lib
+    end
+end
 
 ## Colour map for a category set: category name -> hex colour.
 # Falls back to _UNASSIGNED_COLOUR for "Unassigned" and "#95a5a6" for anything else.
 function _category_colour_for(set_name::String)
-    cfg = Categories.load_category_set(set_name;
-                                       compositions_dir=_chart_compositions_dir())
+    cfg = get(_chart_library()["sets"], set_name, nothing)
     colour_map = Dict{String,String}()
     if !isnothing(cfg)
         for cat in get(cfg, "categories", [])
@@ -153,8 +181,7 @@ function _chart_data(con, table::String, columns::Vector{String},
     else
         # Ensure the Category__ column exists (lazy backfill for old runs).
         Categories.ensure_columns!(con, table, source, [value];
-                                   compositions_dir=_chart_compositions_dir(),
-                                   filters_dir=_filters_dir())
+                                   library=_chart_library())
         col = Categories.column_name(value)
         # Verify the column now exists; it may still be absent when the set
         # config file does not exist (ensure_columns! skips missing sets).
@@ -435,16 +462,16 @@ function _exclusion_conditions(study::String, run, group, columns::Vector{String
                    _analysis_exclude_categories(study; run, group, config_cache))
     isempty(specs) && return String[]
     source = _tagging_source(study, run; group)
-    compositions_dir = _chart_compositions_dir()
-    filters_dir = _filters_dir()
+    lib = _chart_library()
+    filters = lib["filters"]
     col_set = Set(columns)
     conds = String[]
     for spec in specs
-        cfg = Categories.load_category_set(spec.set; compositions_dir)
+        cfg = get(lib["sets"], spec.set, nothing)
         isnothing(cfg) && continue
         cats = get(cfg, "categories", [])
         case = Categories.category_case_when(cats, col_set, source;
-                                             filters_dir, table_alias="", strict=true)
+                                             filters, table_alias="", strict=true)
         # Drop rows only when the set is exactly realisable AND the excluded
         # category is reachable in the CASE, either as its own branch (THEN) or
         # as the catch-all (ELSE); otherwise the condition would silently exclude
@@ -889,8 +916,7 @@ end
                 # The tagging source backfills Category__ columns for older runs.
                 tag_source = _tagging_source(study, resolved.run; group=resolved.group)
                 Categories.ensure_columns!(con, table, tag_source, [value];
-                                           compositions_dir=_chart_compositions_dir(),
-                                           filters_dir=_filters_dir())
+                                           library=_chart_library())
                 col = Categories.column_name(value)
                 # Guard: skip this run if the category column is absent (set config missing).
                 present = Set(string.(DataFrame(DBInterface.execute(con,

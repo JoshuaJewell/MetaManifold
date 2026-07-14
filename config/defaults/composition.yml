@@ -1,0 +1,193 @@
+filters:
+  archaea.pr2:
+    filters:
+      - column: "Domain"
+        pattern: "Archaea"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Domain"
+  bacteria.pr2:
+    filters:
+      - column: "Domain"
+        pattern: "Bacteria"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Domain"
+  bacteria_archaea.pr2:
+    filters:
+      - regex: true
+        column: "Domain"
+        pattern: "Bacteria|Archaea"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Domain"
+  environmental_protozoa.pr2:
+    filters:
+      - regex: true
+        column: "Subdivision"
+        pattern: "Cercozoa|Gyrista|Ciliophora|Chrompodellids"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Subdivision"
+  eukaryome_whitelist:
+    filters:
+      - column: "Genus"
+        values:
+          - "Hexamastix"
+          - "Simplicimonas"
+          - "Iotanema"
+          - "Blastocystis"
+          - "Colpodella"
+          - "Spironucleus"
+        type: "include"
+    databases:
+      - "pr2"
+  fungi.pr2:
+    filters:
+      - column: "Subdivision"
+        pattern: "Fungi"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Subdivision"
+  helminths.pr2:
+    filters:
+      - column: "Class"
+        pattern: "Nematoda"
+        action: "keep"
+      - column: "Genus"
+        pattern: "Miculenchus"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Class"
+  invertebrates.pr2:
+    filters:
+      - column: "Subdivision"
+        pattern: "Metazoa"
+        action: "keep"
+      - column: "Class"
+        pattern: "Craniata"
+      - column: "Class"
+        pattern: "Nematoda"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Subdivision"
+  parasitic_protozoa.pr2:
+    filters:
+      - regex: true
+        column: "Subdivision"
+        pattern: "Apicomplexa|Parabasalia|Fornicata|Bigyra"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Subdivision"
+  plants.pr2:
+    filters:
+      - regex: true
+        column: "Division"
+        pattern: "Streptophyta|Chlorophyta"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Division"
+  plants_invertebrates.pr2:
+    filters:
+      - regex: true
+        column: "Domain"
+        pattern: "Bacteria|Archaea"
+      - regex: true
+        column: "Domain"
+        pattern: "Eukaryota:plas|Eukaryota:mito"
+      - regex: true
+        column: "Subdivision"
+        pattern: "Fungi|Apicomplexa|Ciliophora|Chrompodellids|Parabasalia|Fornicata|Cercozoa|Bigyra|Gyrista|Euglenozoa|Eumycetozoa|Foraminifera|Rhodophyta_X|Prasinodermophyta_X|Discoba_X"
+      - column: "Class"
+        pattern: "Craniata"
+      - regex: true
+        column: "Genus"
+        pattern: "Trichuris|Strongyloides"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Domain"
+  protist.pr2:
+    filters:
+      - regex: true
+        column: "Domain"
+        pattern: "Bacteria|Archaea"
+      - regex: true
+        column: "Domain"
+        pattern: "Eukaryota:plas|Eukaryota:mito"
+      - column: "Supergroup"
+        pattern: "TSAR:chro"
+      - regex: true
+        column: "Subdivision"
+        pattern: "Metazoa|Fungi"
+      - column: "Division"
+        pattern: "Rhodophyta"
+      - column: "Class"
+        pattern: "Embryophyceae"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Domain"
+  vertebrates.pr2:
+    filters:
+      - column: "Class"
+        pattern: "Craniata"
+        action: "keep"
+    databases:
+      - "pr2"
+    remove_empty:
+      - "Class"
+sets:
+  contamination:
+    categories:
+      - name: "Retained"
+        colour: "#2e7d32"
+        filter: "eukaryome_whitelist"
+      - name: "Contaminant"
+        colour: "#c0392b"
+    label: "Contamination"
+    description: "Whitelist contamination model. Only the target eukaryote genera are Retained; every other row, whether classified as something else or left unclassified, falls into the catch-all Contaminant bucket and can be dropped from figures via analysis.exclude_categories: [{set: contamination, category: Contaminant}]. Curate config/filters/eukaryome_whitelist.yml to change the whitelist. Contaminant carries no filter: it is the catch-all for everything the whitelist does not retain."
+  default:
+    categories:
+      - name: "Protozoa"
+        colour: "#3498db"
+        filter: "protist.pr2"
+      - name: "Helminths"
+        colour: "#800020"
+        filter: "helminths.pr2"
+      - name: "Fungi"
+        colour: "#f1c40f"
+        filter: "fungi.pr2"
+      - name: "Host"
+        colour: "#e74c3c"
+        filter: "vertebrates.pr2"
+      - name: "Plants"
+        colour: "#2e7d32"
+        filter: "plants.pr2"
+      - name: "Invertebrates"
+        colour: "#81c784"
+        filter: "invertebrates.pr2"
+      - name: "Bacteria"
+        colour: "#8e44ad"
+        filter: "bacteria.pr2"
+      - name: "Archaea"
+        colour: "#e67e22"
+        filter: "archaea.pr2"
+    label: "Default Composition"
+    description: "Standard organism categories for gut metagenomics"

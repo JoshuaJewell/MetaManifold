@@ -9,6 +9,7 @@ include("core/duckdb_store.jl")
 include("core/validate.jl")
 include("core/project.jl")
 include("core/categories.jl")
+include("core/composition_library.jl")
 
 # Annotation
 include("annotation/funcdb.jl")

@@ -13,6 +13,7 @@ import type {
   CompositionSummaryRequest,
   VennRequest, VennResult,
   ChartCosmeticsMap, ChartCosmeticsPatch,
+  CompositionFilter, CompositionSet, CompositionLibraryDoc,
 } from './types'
 
 // Base URL for the backend API. Empty string means same-origin.
@@ -290,6 +291,15 @@ export const api = {
           ...(categorySet ? { category_set: categorySet } : {}),
           ...(keywordFilter ? { filter: keywordFilter } : {}),
         }),
+    library:      () => get<CompositionLibraryDoc>('/api/v1/composition'),
+    saveFilter:   (name: string, body: CompositionFilter) =>
+      post<CompositionLibraryDoc>(`/api/v1/composition/filters/${encodeURIComponent(name)}`, body),
+    deleteFilter: (name: string) =>
+      del<{ deleted: string }>(`/api/v1/composition/filters/${encodeURIComponent(name)}`),
+    saveSet:      (name: string, body: CompositionSet) =>
+      post<CompositionLibraryDoc>(`/api/v1/composition/sets/${encodeURIComponent(name)}`, body),
+    deleteSet:    (name: string) =>
+      del<{ deleted: string }>(`/api/v1/composition/sets/${encodeURIComponent(name)}`),
   },
 
   chartCosmetics: {

@@ -4,34 +4,86 @@
 # Routes: organism composition - category-based classification of ASVs/OTUs
 # for relative abundance analysis across broad organism groups.
 using JSON3, CSV, DataFrames, OrderedCollections, DuckDB, DBInterface, YAML
-using MetaManifold.Categories
+using MetaManifold.Categories, MetaManifold.CompositionLibrary
 
 # Catch-all bucket for taxa matching no category, and its fixed legend colour.
 const _UNASSIGNED_CATEGORY = "Unassigned"
 const _UNASSIGNED_COLOUR = "#95a5a6"
 
-## Helpers
-function _compositions_dir()
-    joinpath(dirname(ServerState.projects_dir()), "config", "compositions")
+## Composition library
+function _library_path()
+    joinpath(dirname(ServerState.projects_dir()), "config", "composition.yml")
 end
 
-## Category set loading
-# These wrappers delegate to Categories, which accepts explicit directory paths
-# rather than reading from ServerState globals.
-_load_category_set(name::String) =
-    Categories.load_category_set(name; compositions_dir=_compositions_dir())
+_library() = CompositionLibrary.load(_library_path())
 
+# Write the whole library back to config/composition.yml.
+function _write_library(lib::Dict)
+    path = _library_path()
+    mkpath(dirname(path))
+    open(path, "w") do io
+        YAML.write(io, lib)
+    end
+end
+
+# List the category sets defined in the composition library.
 function _list_category_sets()
-    dir = _compositions_dir()
-    isdir(dir) || return []
     sets = Dict{String,Any}[]
-    for f in sort(readdir(dir))
-        (endswith(f, ".yml") || endswith(f, ".yaml")) || continue
-        config = try YAML.load_file(joinpath(dir, f)) catch; continue end
-        name = f[1:end - (endswith(f, ".yaml") ? 5 : 4)]
+    for (name, config) in sort(collect(_library()["sets"]); by=first)
         push!(sets, _category_set_summary(name, config))
     end
     sets
+end
+
+# Persist the whole library, validating the document before it lands on disk.
+# This is the single gate through which every filter and set write passes, so
+# a dangling filter reference is caught here rather than reaching the SQL
+# generator, where it would silently classify every row as 'Unassigned'.
+# Returns the library, or an HTTP.Response error.
+function _save_library(lib::Dict)
+    errors = CompositionLibrary.validate(lib)
+    isempty(errors) || return json_error(400, "invalid_library", join(errors, "; "))
+    _write_library(lib)
+    lib
+end
+
+# Save a filter config verbatim into the library. Returns the saved filter
+# config, or an HTTP.Response error.
+function _save_filter(name::String, config::AbstractDict)
+    lib = _library()
+    lib["filters"][name] = config
+    result = _save_library(lib)
+    result isa HTTP.Response && return result
+    @info "Saved filter: $name (library $(_library_path()))"
+    result["filters"][name]
+end
+
+# Remove a filter from the library; refuses when a set still references it,
+# naming the referencing sets. Returns the deleted name, or an HTTP.Response.
+function _delete_filter(name::String)
+    lib = _library()
+    users = CompositionLibrary.filter_in_use(lib, name)
+    isempty(users) || return json_error(409, "filter_in_use",
+        "Filter '$name' is used by: " * join(users, ", "))
+    haskey(lib["filters"], name) || return json_error(404, "filter_not_found",
+        "Filter '$name' not found")
+    delete!(lib["filters"], name)
+    _write_library(lib)
+    @info "Deleted filter: $name (library $(_library_path()))"
+    name
+end
+
+# Save a whole set config verbatim into the library. This is the composition
+# builder's direct-save path, distinct from `_save_category_set`'s
+# save-as-a-recolour path used by the existing category-sets routes. Returns
+# the saved set config, or an HTTP.Response error.
+function _save_composition_set(name::String, config::AbstractDict)
+    lib = _library()
+    lib["sets"][name] = config
+    result = _save_library(lib)
+    result isa HTTP.Response && return result
+    @info "Saved category set: $name (library $(_library_path()))"
+    result["sets"][name]
 end
 
 ## Filter to SQL translation
@@ -67,8 +119,17 @@ function _composition_summary(study::String, run::String, category_set_name::Str
     isnothing(merge_dir) && return json_error(404, "no_results",
         "No results database for run '$run' - run the pipeline first")
 
-    cat_config = _load_category_set(category_set_name)
-    isnothing(cat_config) && return json_error(404, "category_set_not_found",
+    # The name is interpolated into a quoted SQL identifier below, via
+    # `Categories.column_name`. Membership of the library is not by itself a
+    # character guarantee: it holds only because every API write charset-checks the
+    # key. Re-assert the guard here so the safety of this SQL does not depend on an
+    # invariant enforced in another module.
+    Validation.is_safe_name(category_set_name) ||
+        return json_error(400, "invalid_name",
+            "Category set name must contain only letters, numbers, dots, hyphens, and underscores")
+
+    lib = _library()
+    haskey(lib["sets"], category_set_name) || return json_error(404, "category_set_not_found",
         "Category set '$category_set_name' not found")
 
     source = _tagging_source(study, run; group)
@@ -77,8 +138,7 @@ function _composition_summary(study::String, run::String, category_set_name::Str
     with_results_db_write(merge_dir) do con
         # Ensure the category column is present; backfill when absent.
         Categories.ensure_columns!(con, "merged", source, [category_set_name];
-                                   compositions_dir=_compositions_dir(),
-                                   filters_dir=_filters_dir())
+                                   library=lib)
 
         all_sample_cols = Analysis.sample_columns(con, "merged")
 
@@ -129,6 +189,48 @@ end
 
 ## Routes
 
+# The whole composition library: filters plus sets, for the frontend's
+# composition builder (Tasks 7-8).
+@get "/api/v1/composition" function(req)
+    json(_library())
+end
+
+# Create or update a named filter. The whole library is validated before the
+# write lands on disk, so a name violating the charset or a value that is not
+# a Dict is rejected with 400 "invalid_library".
+@post "/api/v1/composition/filters/{name}" function(req, name::String)
+    body = _to_plain(JSON3.read(String(req.body)))
+    result = _save_filter(name, body)
+    result isa HTTP.Response && return result
+    json(result)
+end
+
+# Delete a filter. Refused with 409 "filter_in_use" (naming the referencing
+# sets) while any set still references it; 404 "filter_not_found" when absent.
+@delete "/api/v1/composition/filters/{name}" function(req, name::String)
+    result = _delete_filter(name)
+    result isa HTTP.Response && return result
+    json((; deleted=result))
+end
+
+# Create or update a set from its whole config (label, description,
+# unassigned_colour, categories). A category naming a filter absent from the
+# library fails validation and is rejected with 400 "invalid_library".
+@post "/api/v1/composition/sets/{name}" function(req, name::String)
+    body = _to_plain(JSON3.read(String(req.body)))
+    result = _save_composition_set(name, body)
+    result isa HTTP.Response && return result
+    json(result)
+end
+
+# Delete a set; `default` is protected. Shares `_delete_category_set` since
+# the library is the single store regardless of which route deletes a set.
+@delete "/api/v1/composition/sets/{name}" function(req, name::String)
+    result = _delete_category_set(name)
+    result isa HTTP.Response && return result
+    json((; deleted=result))
+end
+
 # List category sets
 @get "/api/v1/category-sets" function(req)
     json(_list_category_sets())
@@ -141,7 +243,7 @@ function _category_set_summary(name::String, config)
             for c in cs]
     Dict(
         "name"             => name,
-        "label"            => get(config, "name", name),
+        "label"            => get(config, "label", get(config, "name", name)),
         "description"      => get(config, "description", ""),
         "categories"       => cats,
         "unassigned_colour" => string(get(config, "unassigned_colour", _UNASSIGNED_COLOUR)),
@@ -149,22 +251,24 @@ function _category_set_summary(name::String, config)
 end
 
 # Clone the base set's structure verbatim, overriding only the colours by
-# category name, and write `{name}.yml`. Returns the saved set summary, or an
+# category name, and write the updated set into the library at
+# `config/composition.yml`. Returns the saved set summary, or an
 # `HTTP.Response` error mirroring the route's failure modes.
 function _save_category_set(name::String, base::String,
                             colours::Dict{String,String};
                             label::Union{String,Nothing}=nothing,
                             description::Union{String,Nothing}=nothing)
-    occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
+    Validation.is_safe_name(name) || return json_error(400, "invalid_name",
         "Name must contain only letters, numbers, dots, hyphens, and underscores")
     isempty(base) && return json_error(400, "missing_base", "Body must include 'base'")
 
-    base_config = _load_category_set(base)
+    lib = _library()
+    base_config = get(lib["sets"], base, nothing)
     isnothing(base_config) && return json_error(404, "base_not_found",
         "Base category set '$base' not found")
 
     for clr in values(colours)
-        occursin(r"^#[0-9a-fA-F]{6}$", clr) || return json_error(400, "invalid_colour",
+        occursin(CompositionLibrary.COLOUR_RE, clr) || return json_error(400, "invalid_colour",
             "Colour '$clr' must be a hex triplet like '#3498db'")
     end
 
@@ -183,7 +287,7 @@ function _save_category_set(name::String, base::String,
     end
 
     out = OrderedDict{String,Any}(
-        "name"        => isnothing(label) ? get(base_config, "name", name) : label,
+        "label"       => isnothing(label) ? get(base_config, "label", name) : label,
         "description" => isnothing(description) ? get(base_config, "description", "") : description,
         "categories"  => out_cats,
     )
@@ -193,29 +297,27 @@ function _save_category_set(name::String, base::String,
                      get(base_config, "unassigned_colour", nothing))
     isnothing(unassigned) || (out["unassigned_colour"] = string(unassigned))
 
-    dir = _compositions_dir()
-    mkpath(dir)
-    path = joinpath(dir, name * ".yml")
-    open(path, "w") do io
-        YAML.write(io, out)
-    end
-    @info "Saved category set: $path"
+    lib["sets"][name] = out
+    result = _save_library(lib)
+    result isa HTTP.Response && return result
+    @info "Saved category set: $name (library $(_library_path()))"
     _category_set_summary(name, out)
 end
 
-# Remove `{name}.yml`; `default` is protected. Returns the deleted name, or an
-# `HTTP.Response` error.
+# Remove a set from the library; `default` is protected. Returns the deleted
+# name, or an `HTTP.Response` error.
 function _delete_category_set(name::String)
-    occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
+    Validation.is_safe_name(name) || return json_error(400, "invalid_name",
         "Name must contain only letters, numbers, dots, hyphens, and underscores")
     name == "default" && return json_error(400, "protected_set",
         "The 'default' category set cannot be deleted")
 
-    path = joinpath(_compositions_dir(), name * ".yml")
-    isfile(path) || return json_error(404, "set_not_found",
+    lib = _library()
+    haskey(lib["sets"], name) || return json_error(404, "set_not_found",
         "Category set '$name' not found")
-    rm(path)
-    @info "Deleted category set: $path"
+    delete!(lib["sets"], name)
+    _write_library(lib)
+    @info "Deleted category set: $name (library $(_library_path()))"
     name
 end
 
@@ -289,8 +391,7 @@ end
     tag_src = _tagging_source(study, run; group)
     with_results_db_write(merge_dir) do con
         Categories.ensure_columns!(con, "merged", tag_src, [category_set];
-                                   compositions_dir=_compositions_dir(),
-                                   filters_dir=_filters_dir())
+                                   library=_library())
         _duckdb_paginated_query(con, "merged", body)
     end
 end
@@ -315,8 +416,7 @@ end
     tag_src = _tagging_source(study, run; group)
     with_results_db_write(merge_dir) do con
         Categories.ensure_columns!(con, "merged", tag_src, [category_set];
-                                   compositions_dir=_compositions_dir(),
-                                   filters_dir=_filters_dir())
+                                   library=_library())
         _duckdb_distinct(con, "merged", column, body)
     end
 end

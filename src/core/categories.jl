@@ -6,7 +6,8 @@
 # or on any server-state globals. All directory paths are passed explicitly.
 module Categories
 
-using YAML, DuckDB, DBInterface, DataFrames
+using DuckDB, DBInterface, DataFrames
+using ..Validation
 
 ## Rank-name translation between the VSEARCH-named merged columns and their
 ## DADA2 counterparts. Self-contained so categorisation does not depend on the
@@ -25,35 +26,6 @@ const _RANK_PAIRS = [
 
 # Return the column name used in the composed table for a category set.
 column_name(set_name::AbstractString) = "Category__" * String(set_name)
-
-## Category-set YAML loading
-
-# Load a named category set from `compositions_dir`. Returns `nothing` when the
-# set does not exist or the name is unsafe (path-traversal guard).
-function load_category_set(name::String; compositions_dir::String)
-    occursin(r"^[a-zA-Z0-9._-]+$", name) || return nothing
-    isdir(compositions_dir) || return nothing
-    path = joinpath(compositions_dir, name * ".yml")
-    isfile(path) || return nothing
-    YAML.load_file(path)
-end
-
-# List all category sets found in `compositions_dir`, sorted by filename.
-function list_category_sets(compositions_dir::String)
-    isdir(compositions_dir) || return []
-    sets = Dict{String,Any}[]
-    for f in sort(readdir(compositions_dir))
-        (endswith(f, ".yml") || endswith(f, ".yaml")) || continue
-        config = try YAML.load_file(joinpath(compositions_dir, f)) catch; continue end
-        name = f[1:end - (endswith(f, ".yaml") ? 5 : 4)]
-        push!(sets, config)  # callers may enrich with the name separately
-        # Replace the bare config with a minimal keyed entry matching
-        # the shape the server route needs: delegate to caller for richer
-        # summaries, but at minimum expose "name" for pipeline callers.
-        sets[end] = merge(config, Dict("_set_name" => name))
-    end
-    sets
-end
 
 ## Filter to SQL translation
 
@@ -187,7 +159,7 @@ function filter_column_refs(filter_config::Dict;
 end
 
 """
-    category_case_when(categories, merged_col_set, source; filters_dir, table_alias, strict) -> Union{String,Nothing}
+    category_case_when(categories, merged_col_set, source; filters, table_alias, strict) -> Union{String,Nothing}
 
 Build a SQL CASE WHEN expression that classifies each row into a category.
 Filter column names are translated to the correct source columns (VSEARCH or
@@ -205,40 +177,42 @@ named, colourable category.
 By default (`strict=false`, for display) a filter that references an absent
 column has that condition dropped and still contributes a branch, and the
 result is always a string. With `strict=true` (for row-dropping figure
-exclusion) the classification must be exactly realisable: if any category's
-filter is unsafe, missing, unparseable, or references a column absent from
-`merged_col_set`, or no category yields a branch, `nothing` is returned so the
-caller drops nothing rather than the wrong rows.
+exclusion) the classification must be exactly realisable: if any category
+names a filter missing from `filters`, or that filter references a column
+absent from `merged_col_set`, or no category yields a branch, `nothing` is
+returned so the caller drops nothing rather than the wrong rows.
 """
 function category_case_when(categories::Vector, merged_col_set::Set{String},
-                            source::String; filters_dir::String,
+                            source::String; filters::Dict,
                             table_alias::String="m", strict::Bool=false)
     col_map = col_translate_map(source)
     branches = String[]
     catchall = "Unassigned"
 
+    # Resolve filter names against stringified keys. A caller that builds this
+    # dict itself, rather than taking it from CompositionLibrary.load, may hold a
+    # non-String key (YAML and JSON both parse a numeric name as an integer), and
+    # a raw lookup would then dangle a filter that is in fact present. A dict
+    # already keyed by String, which is what the library hands us, needs no
+    # rebuild; this runs once per set, so the copy is not free.
+    by_name = keytype(filters) === String ? filters :
+              Dict{String,Any}(string(k) => v for (k, v) in filters)
+
     for cat in categories
         cat_name = get(cat, "name", "")
         isempty(cat_name) && continue
 
-        filter_file = get(cat, "filter", nothing)
+        filter_name = get(cat, "filter", nothing)
         # A filterless category names the catch-all bucket (the ELSE label).
-        isnothing(filter_file) && (catchall = string(cat_name); continue)
+        isnothing(filter_name) && (catchall = string(cat_name); continue)
 
-        # The filter name becomes a path component; reject anything outside safe
-        # identifier characters so it cannot traverse to an arbitrary file.
-        if !occursin(r"^[a-zA-Z0-9._-]+$", string(filter_file))
-            strict && return nothing
-            continue
-        end
-        filter_path = joinpath(filters_dir, string(filter_file))
-        if !isfile(filter_path)
-            strict && return nothing
-            continue
-        end
-        filter_config = try
-            YAML.load_file(filter_path)
-        catch
+        # Resolve the filter by name from the library. A dangling name is a
+        # config error: dropped for display, fatal under strict. Warn in both
+        # modes so the error is never silent (a bad migration that dangles
+        # every category must not render as a plausible all-Unassigned figure).
+        filter_config = get(by_name, string(filter_name), nothing)
+        if isnothing(filter_config)
+            @warn "category_case_when: category names a filter absent from the filter library" category=cat_name filter=filter_name
             strict && return nothing
             continue
         end
@@ -269,33 +243,42 @@ end
 ## DuckDB category-column writer and lazy backfill
 
 """
-    write_category_columns!(con, table, source, set_names; compositions_dir, filters_dir)
+    write_category_columns!(con, table, source, set_names; library)
 
 For each category set in `set_names`, add a `Category__<set>` VARCHAR column to
 `table` (idempotent via ADD COLUMN IF NOT EXISTS) and UPDATE it with the
 CASE WHEN classification expression for `source`. Columns already populated are
 still refreshed by the UPDATE; use `ensure_columns!` for a pure backfill.
+`library` is the whole composition library Dict (as returned by
+`CompositionLibrary.load`): a set's categories are read from
+`library["sets"][set_name]["categories"]`, and `library["filters"]` is passed
+through as the `filters` a category's classification resolves against.
 """
 function write_category_columns!(con, table::String, source::String,
                                  set_names::Vector{String};
-                                 compositions_dir::String, filters_dir::String)
+                                 library::Dict)
     cols = Set(string.(DataFrame(DBInterface.execute(con,
         "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
         [table])).column_name))
+    sets = get(library, "sets", Dict())
+    filters = get(library, "filters", Dict())
     for set_name in set_names
         # Guard: the set name is used as a quoted SQL identifier. Reject any
         # name that falls outside safe identifier characters so a double-quote
         # cannot escape the quoting and inject SQL.
-        if !occursin(r"^[A-Za-z0-9._-]+$", set_name)
+        if !Validation.is_safe_name(set_name)
             @warn "write_category_columns!: skipping set with unsafe name" set_name
             continue
         end
-        cfg = load_category_set(set_name; compositions_dir)
-        isnothing(cfg) && continue
+        cfg = get(sets, set_name, nothing)
+        if isnothing(cfg)
+            @warn "write_category_columns!: skipping set absent from the library" set_name
+            continue
+        end
         cats = get(cfg, "categories", [])
         # Use empty alias: UPDATE runs against the bare table, no FROM alias.
         case = category_case_when(cats, cols, source;
-                                  filters_dir, table_alias="")
+                                  filters, table_alias="")
         colname = column_name(set_name)
         DBInterface.execute(con,
             "ALTER TABLE \"$table\" ADD COLUMN IF NOT EXISTS \"$colname\" VARCHAR")
@@ -334,21 +317,21 @@ function apply_max_x!(con, table::String, rank_cols::Vector{String}, max_x::Int)
 end
 
 """
-    ensure_columns!(con, table, source, set_names; compositions_dir, filters_dir)
+    ensure_columns!(con, table, source, set_names; library)
 
 Lazy backfill: write only the `Category__<set>` columns that are absent from
-`table`, leaving any already-present ones untouched. Idempotent.
+`table`, leaving any already-present ones untouched. Idempotent. `library` is
+the whole composition library Dict; see `write_category_columns!`.
 """
 function ensure_columns!(con, table::String, source::String,
                          set_names::Vector{String};
-                         compositions_dir::String, filters_dir::String)
+                         library::Dict)
     present = Set(string.(DataFrame(DBInterface.execute(con,
         "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
         [table])).column_name))
     missing_sets = filter(s -> !(column_name(s) in present), set_names)
     isempty(missing_sets) && return nothing
-    write_category_columns!(con, table, source, missing_sets;
-                            compositions_dir, filters_dir)
+    write_category_columns!(con, table, source, missing_sets; library)
     nothing
 end
 

@@ -15,10 +15,10 @@ Create/recreate a DuckDB database at `merge_dir/results.duckdb` by loading all
 CSVs in the merge directory. If `swarm_dir` is provided and contains
 `cluster_membership.csv`, that table is loaded too.
 
-When `tagging` is a Dict with keys "source", "max_x", "category_sets",
-"compositions_dir", and "filters_dir", and the merged table is present, this
-function calls `Categories.apply_max_x!` then `Categories.write_category_columns!`
-on it before closing the connection.
+When `tagging` is a Dict with keys "source", "max_x", "category_sets", and
+"library_path", and the merged table is present, this function calls
+`Categories.apply_max_x!` then `Categories.write_category_columns!` on it
+before closing the connection.
 """
 function load_results_db(merge_dir::String;
                          swarm_dir::Union{String,Nothing}=nothing,
@@ -107,12 +107,12 @@ function _apply_tagging!(con, tagging::Dict)
     merged_table = "merged"
     _table_exists(con, merged_table) || return nothing
 
-    cats_mod    = parentmodule(DuckDBStore).Categories
-    source      = string(get(tagging, "source", "VSEARCH"))
-    max_x       = Int(get(tagging, "max_x", -1))
-    set_names   = Vector{String}(get(tagging, "category_sets", String[]))
-    comp_dir    = string(get(tagging, "compositions_dir", ""))
-    filters_dir = string(get(tagging, "filters_dir", ""))
+    cats_mod     = parentmodule(DuckDBStore).Categories
+    complib_mod  = parentmodule(DuckDBStore).CompositionLibrary
+    source       = string(get(tagging, "source", "VSEARCH"))
+    max_x        = Int(get(tagging, "max_x", -1))
+    set_names    = Vector{String}(get(tagging, "category_sets", String[]))
+    library_path = string(get(tagging, "library_path", ""))
 
     if source != "VSEARCH" && source != "DADA2"
         @warn "Unknown taxonomy source in tagging block; rank columns will be empty" source
@@ -121,10 +121,9 @@ function _apply_tagging!(con, tagging::Dict)
     cats_mod.apply_max_x!(con, merged_table, rank_cols, max_x)
 
     isempty(set_names) && return nothing
-    (isempty(comp_dir) || isempty(filters_dir)) && return nothing
-    cats_mod.write_category_columns!(con, merged_table, source, set_names;
-                                     compositions_dir=comp_dir,
-                                     filters_dir=filters_dir)
+    isempty(library_path) && return nothing
+    library = complib_mod.load(library_path)
+    cats_mod.write_category_columns!(con, merged_table, source, set_names; library)
     nothing
 end
 

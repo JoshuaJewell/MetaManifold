@@ -297,3 +297,37 @@ export interface ChartCosmeticsPatch extends ChartCosmetics {
   chart_type: string
   clear?: boolean
 }
+
+export interface CompositionFilterRule {
+  column?:  string
+  type?:    'include' | 'min' | 'max'
+  values?:  string[]
+  value?:   number
+  // Pattern rules are preserved on round-trip but not editable in the first-pass UI.
+  pattern?: string
+  action?:  string
+  regex?:   boolean
+}
+
+export interface CompositionFilter {
+  databases?:    string[]
+  remove_empty?: string[]
+  filters?:      CompositionFilterRule[]
+}
+
+export interface CompositionCategory extends CategoryInfo {
+  // An absent filter marks the catch-all category.
+  filter?: string
+}
+
+export interface CompositionSet {
+  label?:             string
+  description?:       string
+  unassigned_colour?: string
+  categories:         CompositionCategory[]
+}
+
+export interface CompositionLibraryDoc {
+  filters: Record<string, CompositionFilter>
+  sets:    Record<string, CompositionSet>
+}

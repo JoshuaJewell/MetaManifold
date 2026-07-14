@@ -18,11 +18,10 @@ function _tagging_cfg(project, run_cfg::Dict)
     tag = get(run_cfg, "tagging", nothing)
     isnothing(tag) && return nothing
     Dict(
-        "source"           => string(get(tag, "source", "VSEARCH")),
-        "max_x"            => Int(get(tag, "max_x", -1)),
-        "category_sets"    => Vector{String}(get(tag, "category_sets", String[])),
-        "compositions_dir" => joinpath(project.config_dir, "compositions"),
-        "filters_dir"      => joinpath(project.config_dir, "filters"),
+        "source"        => string(get(tag, "source", "VSEARCH")),
+        "max_x"         => Int(get(tag, "max_x", -1)),
+        "category_sets" => Vector{String}(get(tag, "category_sets", String[])),
+        "library_path"  => joinpath(project.config_dir, "composition.yml"),
     )
 end
 

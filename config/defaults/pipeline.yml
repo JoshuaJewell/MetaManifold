@@ -178,9 +178,10 @@ annotation:
 ## Analysis and figures
 analysis:
   # Composition categories to drop from figures, given as {set, category} pairs;
-  # each names a set in config/compositions/ and one of its categories. Set to []
-  # to exclude nothing. The default drops everything the whitelist-based
-  # 'contamination' set does not retain (see config/filters/eukaryome_whitelist.yml).
+  # each names a set in config/composition.yml and one of its categories. Set to
+  # [] to exclude nothing. The default drops everything the whitelist-based
+  # 'contamination' set does not retain (see the eukaryome_whitelist filter in
+  # config/composition.yml).
   # apply_to lists the chart surfaces the exclusion acts on: diversity (alpha,
   # NMDS, PERMANOVA), taxa (rank-tagged chart), composition (category-tagged
   # chart), venn. Omit apply_to to act on all surfaces. Composition is left out

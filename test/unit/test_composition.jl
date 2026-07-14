@@ -25,21 +25,20 @@ SV = Main.Server
 
             ## Minimal category set: one filter that captures Eukaryota rows;
             ## every other row falls through to the implicit ELSE 'Unassigned'.
-            cfg_comps = joinpath(tmp, "config", "compositions")
-            cfg_filt  = joinpath(tmp, "config", "filters")
-            mkpath(cfg_comps); mkpath(cfg_filt)
-            write(joinpath(cfg_comps, "test_set.yml"), """
-            name: Test categories
-            description: Fixture for composition tests
-            categories:
-              - name: Eukaryota
-                filter: euk.yml
-            """)
-            write(joinpath(cfg_filt, "euk.yml"), """
+            # The composition library is the single source of truth for both
+            # the set's existence and its classification SQL.
+            mkpath(joinpath(tmp, "config"))
+            write(joinpath(tmp, "config", "composition.yml"), """
             filters:
-              - column: Domain
-                pattern: Eukaryota
-                action: keep
+              euk:
+                filters:
+                  - { column: Domain, pattern: Eukaryota, action: keep }
+            sets:
+              test_set:
+                label: Test categories
+                description: Fixture for composition tests
+                categories:
+                  - { name: Eukaryota, filter: euk }
             """)
 
             ## Synthetic merged DuckDB with two sub-group prefixes (A_, B_).
@@ -110,6 +109,12 @@ SV = Main.Server
             rX = SV._composition_summary(study, run, "test_set", "X")
             @test rX.status == 400
             @test decode(rX)["error"] == "no_subgroup_samples"
+
+            ## A category set absent from the library is a 404 (CRITICAL 2 guard):
+            ## the existence gate and the classification SQL now share one source.
+            rNone = SV._composition_summary(study, run, "absent_set", nothing)
+            @test rNone.status == 404
+            @test decode(rNone)["error"] == "category_set_not_found"
         finally
             rm(tmp; recursive=true, force=true)
         end
@@ -120,23 +125,31 @@ SV = Main.Server
         tmp = mktempdir()
         try
             SV.ServerState.set_root!(tmp)
-            cfg_comps = joinpath(tmp, "config", "compositions")
-            mkpath(cfg_comps)
+            mkpath(joinpath(tmp, "config"))
 
             ## A base set carrying both `filter` and `funcdb_require`, so we can
             ## confirm those survive a colour-only save byte-for-byte.
-            write(joinpath(cfg_comps, "base.yml"), """
-            name: Base categories
-            description: Fixture base for save tests
-            categories:
-              - name: Protozoa
-                colour: "#3498db"
-                filter: protist.yml
-              - name: Pathogens
-                colour: "#800020"
-                filter: bacteria.yml
-                funcdb_require:
-                  human_pathogen: "yes"
+            write(joinpath(tmp, "config", "composition.yml"), """
+            filters:
+              protist:
+                filters:
+                  - { column: Domain, pattern: Eukaryota, action: keep }
+              bacteria:
+                filters:
+                  - { column: Domain, pattern: Bacteria, action: keep }
+            sets:
+              base:
+                label: Base categories
+                description: Fixture base for save tests
+                categories:
+                  - name: Protozoa
+                    colour: "#3498db"
+                    filter: protist
+                  - name: Pathogens
+                    colour: "#800020"
+                    filter: bacteria
+                    funcdb_require:
+                      human_pathogen: "yes"
             """)
 
             ## Save under a new name with one colour override; the base is untouched.
@@ -148,49 +161,59 @@ SV = Main.Server
             @test cat_by_name["Protozoa"]["colour"] == "#abcdef"   # overridden
             @test cat_by_name["Pathogens"]["colour"] == "#800020"  # preserved
 
-            ## The base YAML on disk is unchanged by a save-as.
-            base_reload = SV._load_category_set("base")
+            ## The base set in the library is unchanged by a save-as.
+            base_reload = SV._library()["sets"]["base"]
             base_proto = first(c for c in base_reload["categories"] if c["name"] == "Protozoa")
             @test base_proto["colour"] == "#3498db"
 
             ## The saved set preserves every category's `filter` and
             ## `funcdb_require` verbatim.
-            reload = SV._load_category_set("recoloured")
+            reload = SV._library()["sets"]["recoloured"]
             saved_by_name = Dict(c["name"] => c for c in reload["categories"])
-            @test saved_by_name["Protozoa"]["filter"] == "protist.yml"
-            @test saved_by_name["Pathogens"]["filter"] == "bacteria.yml"
+            @test saved_by_name["Protozoa"]["filter"] == "protist"
+            @test saved_by_name["Pathogens"]["filter"] == "bacteria"
             @test saved_by_name["Pathogens"]["funcdb_require"]["human_pathogen"] == "yes"
             ## Category order is stable (OrderedDict write).
             @test [c["name"] for c in reload["categories"]] == ["Protozoa", "Pathogens"]
 
-            ## An invalid colour is rejected without touching disk.
+            ## CRITICAL 3 guard: the saved set round-trips through the library,
+            ## so it now appears in the listing (previously it was written to a
+            ## directory the listing route never read).
+            listed = SV._list_category_sets()
+            @test any(s -> s["name"] == "recoloured", listed)
+
+            ## An invalid colour is rejected without touching the library.
             bad = SV._save_category_set("bad", "base", Dict("Protozoa" => "blue"))
             @test bad.status == 400
             @test JSON3.read(String(bad.body))["error"] == "invalid_colour"
-            @test !isfile(joinpath(cfg_comps, "bad.yml"))
+            @test !haskey(SV._library()["sets"], "bad")
 
             ## A missing base set is a 404.
             nob = SV._save_category_set("x", "absent", Dict{String,String}())
             @test nob.status == 404
             @test JSON3.read(String(nob.body))["error"] == "base_not_found"
 
-            ## Delete removes the file and returns the name.
-            @test isfile(joinpath(cfg_comps, "recoloured.yml"))
+            ## Delete removes the set from the library and returns the name.
+            @test haskey(SV._library()["sets"], "recoloured")
             del = SV._delete_category_set("recoloured")
             @test del == "recoloured"
-            @test !isfile(joinpath(cfg_comps, "recoloured.yml"))
+            @test !haskey(SV._library()["sets"], "recoloured")
+            ## ...and it drops out of the listing too.
+            @test !any(s -> s["name"] == "recoloured", SV._list_category_sets())
 
             ## Deleting an absent set is a 404.
             del2 = SV._delete_category_set("recoloured")
             @test del2.status == 404
             @test JSON3.read(String(del2.body))["error"] == "set_not_found"
 
-            ## `default` is protected even if a file exists.
-            write(joinpath(cfg_comps, "default.yml"), "name: Default\ncategories: []\n")
+            ## `default` is protected even if present in the library.
+            lib = SV._library()
+            lib["sets"]["default"] = Dict{String,Any}("label" => "Default", "categories" => [])
+            SV._write_library(lib)
             deld = SV._delete_category_set("default")
             @test deld.status == 400
             @test JSON3.read(String(deld.body))["error"] == "protected_set"
-            @test isfile(joinpath(cfg_comps, "default.yml"))
+            @test haskey(SV._library()["sets"], "default")
         finally
             rm(tmp; recursive=true, force=true)
         end
@@ -201,25 +224,55 @@ SV = Main.Server
         tmp = mktempdir()
         try
             SV.ServerState.set_root!(tmp)
-            comp_dir = joinpath(tmp, "config", "compositions")
-            mkpath(comp_dir)
-            write(joinpath(comp_dir, "base.yml"), """
-            name: Base
-            description: test
-            categories:
-              - name: Fungi
-                colour: "#f1c40f"
-                filter: fungi.pr2.yml
+            mkpath(joinpath(tmp, "config"))
+            write(joinpath(tmp, "config", "composition.yml"), """
+            filters:
+              fungi:
+                filters:
+                  - { column: Domain, pattern: Fungi, action: keep }
+            sets:
+              base:
+                label: Base
+                description: test
+                categories:
+                  - name: Fungi
+                    colour: "#f1c40f"
+                    filter: fungi
             """)
 
             # Saving an "Unassigned" colour writes the top-level field, not a category.
             saved = SV._save_category_set("recol", "base",
                 Dict("Unassigned" => "#112233", "Fungi" => "#abcdef"))
             @test saved["unassigned_colour"] == "#112233"
-            on_disk = SV._load_category_set("recol")
+            on_disk = SV._library()["sets"]["recol"]
             @test on_disk["unassigned_colour"] == "#112233"
             @test all(c -> get(c, "name", "") != "Unassigned", on_disk["categories"])
             @test SV._category_set_summary("recol", on_disk)["unassigned_colour"] == "#112233"
+        finally
+            rm(tmp; recursive=true, force=true)
+        end
+    end
+
+    ## The chart path memoises the parsed library, and a stale hit would render a
+    ## figure against superseded categories. The rewrite here is the adversarial
+    ## case: same byte count, and immediately after the first, so neither the
+    ## file's size nor its mtime distinguishes the two documents. Only a
+    ## content-keyed cache survives it.
+    @testset "chart library cache invalidates on rewrite" begin
+        tmp = mktempdir()
+        try
+            SV.ServerState.set_root!(tmp)
+            path = joinpath(tmp, "config", "composition.yml")
+            mkpath(dirname(path))
+
+            write(path, "filters: {}\nsets:\n  aaa:\n    categories: []\n")
+            @test haskey(SV._chart_library()["sets"], "aaa")
+
+            size_before = filesize(path)
+            write(path, "filters: {}\nsets:\n  bbb:\n    categories: []\n")
+            @test filesize(path) == size_before
+            @test haskey(SV._chart_library()["sets"], "bbb")
+            @test !haskey(SV._chart_library()["sets"], "aaa")
         finally
             rm(tmp; recursive=true, force=true)
         end

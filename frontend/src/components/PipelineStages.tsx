@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { errorMessage } from '../api/errorMessage'
 import { useToast } from './Toast'
 import { timeAgo } from '../utils/timeago'
+import { splitLines } from '../utils/text'
 import { SOURCE_COLORS } from './annotationShared'
 import styles from './PipelineStages.module.css'
 
@@ -404,7 +405,7 @@ function StageConfigField({ dottedKey, leafKey, value, source, study, run, group
   const save = async () => {
     let parsed: unknown
     if (typeHint?.kind === 'string_list') {
-      parsed = draft.split('\n').map(s => s.trim()).filter(s => s.length > 0)
+      parsed = splitLines(draft)
     } else {
       try { parsed = JSON.parse(draft) } catch { parsed = draft }
     }

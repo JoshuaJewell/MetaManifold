@@ -188,7 +188,7 @@ Curation is supported directly in the view:
 
 ### Composition
 
-The composition view classifies each ASV/OTU into a biological category and renders per-sample or pooled stacked bar charts. Category sets are defined in `config/compositions/` (the bundled `default.yml` covers protozoa, helminths, fungi, host, plants, and invertebrates); each category references a filter preset from `config/filters/`. A category summary precedes the chart, and a quality filter can cap the number of unresolved taxonomic placeholders admitted.
+The composition view classifies each ASV/OTU into a biological category and renders per-sample or pooled stacked bar charts. Category sets live in `config/composition.yml` (the bundled `default` set covers protozoa, helminths, fungi, host, plants, and invertebrates); each category references a named taxonomic filter from the `filters:` library in that same file. Both are editable from the Compositions page under SYSTEM in the sidebar. A category summary precedes the chart, and a quality filter can cap the number of unresolved taxonomic placeholders admitted.
 
 <p align="center">
   <img src=".github/screenshots/composition.png" width="800" alt="Composition view with a stacked organism-category bar chart and category summary">
@@ -203,7 +203,8 @@ Settings can be edited in the web UI (per-study, per-group, or per-run) or as YA
 | File | Purpose |
 |------|---------|
 | `config/defaults/` | Canonical defaults for every setting; do not edit |
-| `config/filters/` | Directory of taxonomic filter configs |
+| `config/composition.yml` | Composition library: named taxonomic filters and the category sets that reference them |
+| `config/presets/` | Saved table-view filter presets, written from the Tables view |
 | `config/databases.yml` | Database URIs and optional local paths |
 | `config/primers.yml` | Primer sequences and pair definitions |
 | `config/tools.yml` | Tool binary paths (cutadapt, FastQC, MultiQC, vsearch, cd-hit-est) |
@@ -399,7 +400,7 @@ merge_taxa:
     - "protist_filter.yml"   # -> merged/protist_filter.csv
 ```
 
-Each entry is a filename relative to `config/filters/`. Remove all entries (or set `filters: []`) to produce only the unfiltered `merged.csv`.
+Each entry names a filter in the `filters:` library of `config/composition.yml`. Remove all entries (or set `filters: []`) to produce only the unfiltered `merged.csv`.
 
 ### Configuring analysis (`analysis:` in `pipeline.yml`)
 
@@ -432,13 +433,15 @@ annotation:
   max_rank: "species"   # finest rank to which functional metadata is attached
 ```
 
-### Configuring taxonomic filtering (`config/filters/`)
+### Configuring taxonomic filtering (`filters:` in `config/composition.yml`)
 
-Each file in `config/filters/` defines one biological group to extract from the merged table. Filters are applied after the taxonomy/count merge and produce one additional CSV per entry in `merge_taxa.filters`.
+Each named filter in the `filters:` library of `config/composition.yml` defines one biological group to extract from the merged table. A category set references these filters by name, and the same filters back the `merge_taxa.filters` stage, which produces one additional CSV per entry. Edit them on the Compositions page under SYSTEM in the sidebar, or in the YAML directly.
+
+Saved table-view presets are a separate concern and live in `config/presets/`; the Tables view reads and writes them.
 
 #### Database-specific filters
 
-Filter files carry a `databases:` key so that each filter is only applied when the active database matches. The following filters ship in `config/filters/`:
+Each filter carries a `databases:` key so that it is only applied when the active database matches. The following filters ship in the library:
 
 | Category | PR2 match |
 |----------|-----------|

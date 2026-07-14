@@ -101,12 +101,14 @@ end
 end
 
 ## Filter presets
-function _filters_dir()
-    joinpath(dirname(ServerState.projects_dir()), "config", "filters")
+# Saved table-view presets, written from the Tables view. Distinct from the
+# composition membership filters, which live in config/composition.yml.
+function _presets_dir()
+    joinpath(dirname(ServerState.projects_dir()), "config", "presets")
 end
 
 @get "/api/v1/filter-presets" function(req)
-    dir = _filters_dir()
+    dir = _presets_dir()
     isdir(dir) || return json([])
     presets = map(filter(f -> endswith(f, ".yml"), readdir(dir))) do f
         path = joinpath(dir, f)
@@ -149,7 +151,7 @@ end
     occursin(r"^[a-zA-Z0-9._-]+$", preset_file) || return json_error(400, "invalid_preset",
         "Preset name must contain only letters, numbers, dots, hyphens, and underscores")
 
-    filter_path = joinpath(_filters_dir(), preset_file)
+    filter_path = joinpath(_presets_dir(), preset_file)
     isfile(filter_path) || return json_error(404, "preset_not_found",
                                                   "Preset '$preset_file' not found")
 
@@ -280,12 +282,12 @@ end
     end
 end
 
-## Save filters to config/filters/
+## Save filters to config/presets/
 @post "/api/v1/filter-presets/{name}" function(req, name::String)
     occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
         "Filter name must contain only letters, numbers, dots, hyphens, and underscores")
 
-    dir = _filters_dir()
+    dir = _presets_dir()
     mkpath(dir)
     filename = endswith(name, ".yml") ? name : name * ".yml"
     path = joinpath(dir, filename)
@@ -426,7 +428,7 @@ end
     occursin(r"^[a-zA-Z0-9._-]+$", name) || return json_error(400, "invalid_name",
         "Filter name must contain only letters, numbers, dots, hyphens, and underscores")
     filename = endswith(name, ".yml") ? name : name * ".yml"
-    path = joinpath(_filters_dir(), filename)
+    path = joinpath(_presets_dir(), filename)
     isfile(path) || return json_error(404, "preset_not_found",
                                           "Preset '$name' not found")
     rm(path)

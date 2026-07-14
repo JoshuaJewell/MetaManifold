@@ -9,6 +9,7 @@ import { JobsView } from './views/JobsView'
 import { DatabasesView } from './views/DatabasesView'
 import { NotFoundView } from './views/NotFoundView'
 import { DefaultConfigView } from './views/DefaultConfigView'
+import { CompositionsView } from './views/CompositionsView'
 
 export function App() {
   return (
@@ -21,6 +22,7 @@ export function App() {
             <Route path="jobs" element={<JobsView />} />
             <Route path="databases" element={<DatabasesView />} />
             <Route path="config" element={<DefaultConfigView />} />
+            <Route path="compositions" element={<CompositionsView />} />
             <Route path=":study" element={<StudyView />} />
             <Route path=":study/:slug" element={<SlugResolver />} />
             <Route path=":study/:group/:run" element={<RunView />} />
