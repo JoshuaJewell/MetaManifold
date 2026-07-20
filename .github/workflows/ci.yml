@@ -14,6 +14,15 @@ jobs:
   test:
     name: Julia ${{ matrix.julia-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # The repository's root .Rprofile sources renv/activate.R, so every Rscript
+    # launched from the checkout would auto-activate renv and rewrite the library
+    # paths. That diverts the pinned installs below (all made with lib=.Library)
+    # into renv's sandbox, where the verification step cannot find them, and the
+    # step fails with "dada2 failed to install" even though the build succeeded.
+    # renv is a local-development convenience; CI installs into the system library
+    # and reaches it through R_LIBS_SITE, so the autoloader is disabled job-wide.
+    env:
+      RENV_CONFIG_AUTOLOADER_ENABLED: "FALSE"
     strategy:
       fail-fast: false
       matrix:
