@@ -116,6 +116,7 @@ export function Layout() {
         <NavLink to="/databases" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>Databases</NavLink>
         <NavLink to="/config" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>Default Config</NavLink>
         <NavLink to="/compositions" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>Compositions</NavLink>
+        <NavLink to="/primers" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>Primers</NavLink>
         <div style={{ height: 12 }} />
       </nav>
 

@@ -10,7 +10,6 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
     using SHA
     using CSV
     using DataFrames
-    using Dates
     using Logging
     using ..PipelineTypes
     using ..PipelineLog
@@ -18,29 +17,14 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
 
     _sq(s::AbstractString) = "'" * replace(s, "'" => "'\\''") * "'"
 
-    ## Command capture
-    # A tool's stdout records what it said, never what it was asked. The resolved
-    # command line, optional_args and all, is the only witness to the latter, so it
-    # goes into the log before the tool runs and survives even a crash. The marker
-    # is fixed so that `grep '^\[MetaManifold\] cmd: '` recovers every command a run
-    # issued, and it sits without collision beside the command line cd-hit
-    # volunteers into its own log.
-    const _CMD_MARKER = "[MetaManifold]"
-
-    function _log_command(cmd_str::AbstractString, log_path::AbstractString)
-        open(log_path, "a") do io
-            println(io, _CMD_MARKER, " command at ",
-                    Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
-            println(io, _CMD_MARKER, " cmd: ", cmd_str)
-        end
-    end
-
-    # Appends, never truncates: a stage that issues several commands must not have
-    # each one destroy its predecessor's record. Truncation is the stage's own
-    # affair, done once at entry via PipelineLog.reset_tool_logs.
+    # The resolved command line is logged before a tool runs via
+    # PipelineLog.log_command, whose marker cd-hit's own volunteered command line
+    # sits beside without collision. Appends, never truncates: a stage that issues
+    # several commands must not have each one destroy its predecessor's record.
+    # Truncation is the stage's own affair, done once at entry via reset_tool_logs.
     function _run_logged(cmd_str::String, log_path::String)
         mkpath(dirname(log_path))
-        _log_command(cmd_str, log_path)
+        log_command(cmd_str, log_path)
         try
             open(log_path, "a") do io
                 run(pipeline(`bash -lc $cmd_str`; stdout=io, stderr=io))
@@ -284,7 +268,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
                 cutadapt_cmd = "$cutadapt_bin $primer_args $optional_args -o $(_sq(outputR2)) $(_sq(inputR2))"
             end
 
-            _log_command(cutadapt_cmd, cmd_log)
+            log_command(cutadapt_cmd, cmd_log)
             try
                 open(stats_path, "a") do io
                     run(pipeline(`bash -lc $cutadapt_cmd`; stdout=io, stderr=io))
@@ -301,7 +285,7 @@ export cutadapt, vsearch, multiqc, cdhit, tool_bin, _sq, _run_logged, _safe_opti
             "<(grep \"filtered\" $(_sq(stats_basename)) | cut -f3 -d \"(\" | tr -d \")\") " *
             "> $(_sq(summary_basename))"
 
-        _log_command(cmd, cmd_log)
+        log_command(cmd, cmd_log)
         cd(log_dir) do
             run(pipeline(`bash -lc $cmd`))
         end

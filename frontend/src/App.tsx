@@ -10,6 +10,7 @@ import { DatabasesView } from './views/DatabasesView'
 import { NotFoundView } from './views/NotFoundView'
 import { DefaultConfigView } from './views/DefaultConfigView'
 import { CompositionsView } from './views/CompositionsView'
+import { PrimersView } from './views/PrimersView'
 
 export function App() {
   return (
@@ -23,6 +24,7 @@ export function App() {
             <Route path="databases" element={<DatabasesView />} />
             <Route path="config" element={<DefaultConfigView />} />
             <Route path="compositions" element={<CompositionsView />} />
+            <Route path="primers" element={<PrimersView />} />
             <Route path=":study" element={<StudyView />} />
             <Route path=":study/:slug" element={<SlugResolver />} />
             <Route path=":study/:group/:run" element={<RunView />} />

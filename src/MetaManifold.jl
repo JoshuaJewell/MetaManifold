@@ -13,6 +13,8 @@ include("core/validate.jl")
 include("core/project.jl")
 include("core/categories.jl")
 include("core/composition_library.jl")
+include("core/primers_library.jl")
+include("core/databases_library.jl")
 
 # Annotation
 include("annotation/funcdb.jl")

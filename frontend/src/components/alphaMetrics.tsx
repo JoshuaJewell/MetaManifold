@@ -33,6 +33,45 @@ interface PlotlyFigure {
   layout: Record<string, unknown>
 }
 
+/** The source y-axis id ('y', 'y2', ...) that a shape or annotation ref belongs
+ *  to, or null for a non-panel ref such as 'paper'. Any axis ref, whether an
+ *  x or a y and whether or not it bears a ' domain' suffix, resolves to the
+ *  y-axis that keys `axisMap`, since a panel is one x/y pair. */
+function panelYOfRef(ref: unknown): string | null {
+  if (typeof ref !== 'string') return null
+  const match = /^[xy](\d*)(?: domain)?$/.exec(ref)
+  return match ? `y${match[1]}` : null
+}
+
+/** Rewrite a single axis ref onto `target`, preserving any ' domain' suffix. */
+function remapRef(ref: string, target: string): string {
+  return / domain$/.test(ref) ? `${target} domain` : target
+}
+
+/** Remap the axis refs of layout shapes/annotations onto the renumbered axes,
+ *  dropping any whose owning panel was filtered out. Non-panel refs (e.g.
+ *  'paper') pass through untouched. Returns undefined when `items` is absent. */
+function remapLayoutRefs(
+  items: unknown,
+  axisMap: Map<string, { y: string; x: string }>,
+): unknown[] | undefined {
+  if (!Array.isArray(items)) return undefined
+  const out: unknown[] = []
+  for (const raw of items) {
+    if (!raw || typeof raw !== 'object') { out.push(raw); continue }
+    const item = raw as Record<string, unknown>
+    const panel = panelYOfRef(item.yref) ?? panelYOfRef(item.xref)
+    if (panel === null) { out.push(item); continue }
+    const mapped = axisMap.get(panel)
+    if (!mapped) continue // this panel is not in the kept selection
+    const next: Record<string, unknown> = { ...item }
+    if (typeof item.xref === 'string') next.xref = remapRef(item.xref, mapped.x)
+    if (typeof item.yref === 'string') next.yref = remapRef(item.yref, mapped.y)
+    out.push(next)
+  }
+  return out
+}
+
 /** Filter a 3-panel alpha figure to only the selected metrics, renumbering axes.
  *
  * Deep-clones the figure first because Plotly.react mutates trace objects in place,
@@ -95,6 +134,15 @@ export function filterAlphaFigure(
 
   // Update grid rows
   layout['grid'] = { rows: kept.length, columns: 1, pattern: 'independent' }
+
+  // Shapes and annotations were copied verbatim above; their axis refs still
+  // name the source panels. Remap the survivors and drop those whose panel is
+  // gone, else Plotly conjures phantom axes for the dangling refs and the whole
+  // figure collapses.
+  const shapes = remapLayoutRefs(fig.layout['shapes'], axisMap)
+  const annotations = remapLayoutRefs(fig.layout['annotations'], axisMap)
+  if (shapes) layout['shapes'] = shapes
+  if (annotations) layout['annotations'] = annotations
 
   return { data, layout }
 }

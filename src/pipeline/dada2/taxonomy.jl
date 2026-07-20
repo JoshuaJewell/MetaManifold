@@ -83,6 +83,7 @@
                       "verbose=$verbose_str"
 
         emit("  Running Rscript on $host:$staging_dir")
+        log_command(remote_cmd, log_path)
         open(log_path, "a") do io
             run(pipeline(ssh(host, remote_cmd); stdout=io, stderr=io))
         end
@@ -204,11 +205,11 @@
             R"con <- file($log_path, open='at'); sink(con); sink(con, type='message')"
             try
                 emit("Assigning taxonomy")
+                _r_run_logged("taxa_result <- run_assign_taxonomy(seq_table_nochim, " *
+                              "$(_r_lit(db_path)), list(multithread=$(_r_lit(multithread)), " *
+                              "min_boot=$(_r_lit(min_boot)), levels=$(_r_lit(tax_levels))), " *
+                              "$(_r_lit(verbose)))")
                 R"""
-                taxa_result <- run_assign_taxonomy(
-                    seq_table_nochim, $db_path,
-                    list(multithread=$multithread, min_boot=$min_boot, levels=$tax_levels),
-                    $verbose)
                 taxa_df <- write_taxa_table(taxa_result$tax, taxa_result$boot, index,
                                             $tables_dir, $taxa_prefix)
                 """

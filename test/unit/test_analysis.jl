@@ -102,6 +102,16 @@
         # Only first panel traces show legend
         legend_traces = [t for t in fig["data"] if get(t, "showlegend", false)]
         @test length(legend_traces) == 2
+
+        # The overall-significance label must anchor to its panel's axis domain,
+        # not to paper: a paper-referenced annotation cannot survive the
+        # frontend's per-metric axis renumbering and spawns phantom axes.
+        annotated = Analysis.alpha_boxplot(groups; annotate_significance=true)
+        sig_anns = get(annotated["layout"], "annotations", Any[])
+        @test !isempty(sig_anns)
+        @test all(a -> get(a, "xref", "") != "paper" && get(a, "yref", "") != "paper",
+                  sig_anns)
+        @test all(a -> endswith(String(get(a, "yref", "")), " domain"), sig_anns)
     end
 
     @testset "bar_chart modes and colour_for" begin

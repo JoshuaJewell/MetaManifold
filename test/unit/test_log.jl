@@ -213,6 +213,26 @@
         rm(dir; recursive=true)
     end
 
+    @testset "log_command records the resolved command behind the marker" begin
+        dir      = mktempdir()
+        log_path = joinpath(dir, "tool.log")
+        write(log_path, "header\n")
+
+        PipelineLog.log_command("vsearch --usearch_global q.fa --db ref.fa", log_path)
+        PipelineLog.log_command("cd-hit-est -i q.fa -o out.fa -c 0.97", log_path)
+        content = read(log_path, String)
+
+        # The marker is fixed so a single grep recovers every command a run issued.
+        cmd_lines = filter(l -> startswith(l, "[MetaManifold] cmd: "), readlines(log_path))
+        @test length(cmd_lines) == 2
+        @test cmd_lines[1] == "[MetaManifold] cmd: vsearch --usearch_global q.fa --db ref.fa"
+        @test occursin(r"\[MetaManifold\] command at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", content)
+        # Appends rather than truncating: the header and first command both survive.
+        @test occursin("header", content)
+        @test occursin("cd-hit-est -i q.fa", content)
+        rm(dir; recursive=true)
+    end
+
     @testset "write_combined_log merges run logs" begin
         study_dir = mktempdir()
         run1_dir = joinpath(study_dir, "run1")

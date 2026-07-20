@@ -331,3 +331,73 @@ export interface CompositionLibraryDoc {
   filters: Record<string, CompositionFilter>
   sets:    Record<string, CompositionSet>
 }
+
+export interface PrimerPair {
+  name:    string
+  forward: string
+  reverse: string
+}
+
+export interface PrimerDocument {
+  Forward: Record<string, string>
+  Reverse: Record<string, string>
+  Pairs:   PrimerPair[]
+}
+
+export interface PrimerWarning {
+  pair:          string
+  referenced_by: string[]
+}
+
+export interface PrimerSaveResult {
+  document: PrimerDocument
+  warnings: PrimerWarning[]
+}
+
+export interface DatabaseFormat {
+  uri:          string
+  local:        string | null
+  // dada2 only: a pre-existing path on the remote taxonomy host.
+  remote_path?: string | null
+}
+
+export interface DatabaseCorrectionValue {
+  from: string
+  to:   string
+}
+
+export interface DatabaseCorrection {
+  source: string
+  target: string
+  // Ordered rows, not a map: a map keyed by edited text collapses two rows the
+  // moment one key is typed into the other.
+  values: DatabaseCorrectionValue[]
+}
+
+export interface DatabaseDocumentEntry {
+  key:            string
+  label:          string
+  dada2:          DatabaseFormat
+  vsearch:        DatabaseFormat
+  levels:         string[]
+  vsearch_format: string
+  corrections:    DatabaseCorrection[]
+}
+
+export interface DatabaseDocument {
+  dir:       string
+  databases: DatabaseDocumentEntry[]
+}
+
+export interface DatabaseWarning {
+  kind:             'database_removed' | 'levels_changed' | 'release_mismatch'
+  database:         string
+  used_by?:         string[]
+  dada2_version?:   string
+  vsearch_version?: string
+}
+
+export interface DatabaseSaveResult {
+  document: DatabaseDocument
+  warnings: DatabaseWarning[]
+}

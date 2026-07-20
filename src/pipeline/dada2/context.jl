@@ -88,6 +88,29 @@
         dirs
     end
 
+    ## R command provenance
+    # Render a Julia value as R source text, so a command string assembled here
+    # parses and evaluates in R exactly as written. This is what lets a single
+    # string be both logged and run: the record cannot drift from what executed,
+    # because there is only one string.
+    _r_lit(x::Bool)           = x ? "TRUE" : "FALSE"
+    _r_lit(x::Integer)        = string(x)
+    _r_lit(x::Real)           = string(x)
+    _r_lit(x::AbstractString) = '"' * replace(replace(x, "\\" => "\\\\"), "\"" => "\\\"") * '"'
+    _r_lit(x::AbstractVector) = "c(" * join(_r_lit.(x), ", ") * ")"
+    _r_lit(::Nothing)         = "NULL"
+
+    # Emit the resolved R command behind the standard marker, then evaluate that
+    # very string. Call only from within a stage's sink block: the marker `cat`
+    # goes to the sinked connection, so R remains the sole writer to the log and
+    # no second file handle can interleave. `grep '^\[MetaManifold\] cmd: '`
+    # recovers these beside the shell tools' commands.
+    function _r_run_logged(cmd::AbstractString)
+        marker = PipelineLog.CMD_MARKER * " cmd: R> " * cmd * "\n"
+        R"cat($marker)"
+        reval(cmd)
+    end
+
     ## R function loader
     # Source the R helper functions into the current R session. Called by each
     # stage after its mtime skip check, so R is not loaded for skipped stages.

@@ -304,6 +304,11 @@ config/databases.yml
 config/primers.yml
 config/composition.yml
 
+# Filter presets saved from the Tables view at runtime (see routes/results.jl
+# _presets_dir): your own saved table filters, not shipped defaults. Distinct
+# from the composition library. Machine data; never committed.
+config/presets/
+
 # Migration backups written by scripts/migrate_composition.jl
 config/backup-*/
 

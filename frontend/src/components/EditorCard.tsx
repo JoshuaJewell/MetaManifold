@@ -139,6 +139,51 @@ export const fieldHintStyle: CSSProperties = {
   color:       'var(--color-muted-fg)',
 }
 
+// The app's error red, matching .error-msg in styles/app.css. Inline styles
+// cannot reach that class, so the value is named here rather than a second red
+// being invented at each call site.
+export const dangerColour = '#c92a2a'
+
+//## Row-list editing
+// Index-based edits over a list of rows, shared by the editors that render one.
+export const patchAt = <T,>(items: T[], index: number, patch: Partial<T>): T[] =>
+  items.map((row, i) => (i === index ? { ...row, ...patch } : row))
+
+export const removeAt = <T,>(items: T[], index: number): T[] =>
+  items.filter((_, i) => i !== index)
+
+export type NameIssue = 'blank' | 'duplicate' | null
+
+/**
+ * The name rules the wire format imposes, per row. The document is a name-keyed
+ * mapping, so a blank name has nowhere to go and two rows sharing a name would
+ * silently collapse into one.
+ *
+ * This is the single source of the rule: the editor highlights the offending
+ * row with it and the view gates Save on it. Expressing it twice let the two
+ * normalise differently, so "abc" and "abc " blocked Save while no row was
+ * marked, leaving the user unable to see the cause.
+ */
+export function nameIssues(names: string[]): NameIssue[] {
+  const trimmed = names.map(n => n.trim())
+  const counts = trimmed.reduce<Record<string, number>>((acc, n) => {
+    acc[n] = (acc[n] ?? 0) + 1
+    return acc
+  }, {})
+  return trimmed.map(n => (n === '' ? 'blank' : counts[n] > 1 ? 'duplicate' : null))
+}
+
+// The chrome for one editable row in a list of them.
+export const editorRowStyle: CSSProperties = {
+  display:      'flex',
+  alignItems:   'center',
+  gap:          10,
+  border:       '1px solid var(--color-border)',
+  borderRadius: 6,
+  padding:      '8px 12px',
+  background:   'var(--color-surface)',
+}
+
 const metaStyle: CSSProperties = {
   fontSize: '.78rem',
   color:    'var(--color-muted-fg)',

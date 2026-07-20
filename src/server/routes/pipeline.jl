@@ -174,15 +174,16 @@ function _attest(f::Function, att, env, name::AbstractString)
 end
 
 function _run_full_pipeline(study::String, run::String, db_config::String,
-                             dbs::Dict, db_name::String;
-                             group::Union{String,Nothing}=nothing)
+                             dbs::Dict; group::Union{String,Nothing}=nothing)
     project  = _project_ctx(study, run, group)
-    db_meta  = make_db_meta(db_config, db_name)
 
     # The config must be resolved before anything runs, so preflight can see which
-    # components this run will actually invoke.
+    # components this run will actually invoke, and so the database is the one
+    # this run's config names rather than a global default.
     config_path = write_run_config(project)
     run_cfg     = YAML.load_file(config_path)
+    db_name     = _run_database(run_cfg)
+    db_meta     = make_db_meta(db_config, db_name)
     env         = _preflight(run_cfg, db_config, dbs, db_name)
     att         = _attestation(study, run, group, run_cfg, config_path)
 
@@ -273,7 +274,7 @@ const _STAGE_STOP = Dict(
 )
 
 function _run_stage(study::String, run::String, stage::String,
-                    db_config::String, dbs::Dict, db_name::String;
+                    db_config::String, dbs::Dict;
                     group::Union{String,Nothing}=nothing)
     project = _project_ctx(study, run, group)
 
@@ -281,6 +282,7 @@ function _run_stage(study::String, run::String, stage::String,
     if stage == "fastqc"
         cfg_path = write_run_config(project)
         run_cfg  = YAML.load_file(cfg_path)
+        db_name  = _run_database(run_cfg)
         env = _preflight(run_cfg, db_config, dbs, db_name)
         att = _attestation(study, run, group, run_cfg, cfg_path)
         try
@@ -294,7 +296,6 @@ function _run_stage(study::String, run::String, stage::String,
         return
     end
 
-    db_meta     = make_db_meta(db_config, db_name)
     run_dir     = project.dir
     config_path = write_run_config(project)
     input_dir   = joinpath(run_dir, "cutadapt")
@@ -303,9 +304,11 @@ function _run_stage(study::String, run::String, stage::String,
     # A stage re-run is the accretion case: this run's other stages were produced
     # by whatever was installed when THEY ran, and their records stay true. The
     # Attestation merges, so only the stages executed here are rewritten.
-    stage_cfg = YAML.load_file(config_path)
-    stage_env = _preflight(stage_cfg, db_config, dbs, db_name)
-    stage_att = _attestation(study, run, group, stage_cfg, config_path)
+    stage_cfg   = YAML.load_file(config_path)
+    db_name     = _run_database(stage_cfg)
+    db_meta     = make_db_meta(db_config, db_name)
+    stage_env   = _preflight(stage_cfg, db_config, dbs, db_name)
+    stage_att   = _attestation(study, run, group, stage_cfg, config_path)
 
     target = get(_STAGE_STOP, stage, stage)
     target_idx = findfirst(==(target), _PIPELINE_ORDER)
@@ -467,12 +470,30 @@ function _db_config_path()
     isfile(cfg) ? cfg : joinpath(dirname(ServerState.data_dir()), "config", "ci", "databases.yml")
 end
 
+# The database key a run's config names. Mirrors Validation.validate_project and
+# Provenance.required_database, which both read this key with the same "pr2"
+# fallback, rather than inventing a third rule. The factory defaults set
+# dada2.taxonomy.database, so a merged run config always carries one; the
+# fallback covers only a hand-written config that omits it.
+#
+# This is a property of the run, not a global constant. _load_dbs used to read a
+# `default:` section that no databases.yml in the repository defines, so it always
+# answered "pr2" and silently ignored dada2.taxonomy.database while context.jl and
+# validate.jl both honoured it.
+function _run_database(run_cfg::AbstractDict)
+    da = get(run_cfg, "dada2", Dict())
+    da isa AbstractDict || return "pr2"
+    tx = get(da, "taxonomy", Dict())
+    tx isa AbstractDict || return "pr2"
+    string(get(tx, "database", "pr2"))
+end
+
+# Resolve every configured database once. ensure_databases already covers every
+# entry in the file, so which one a given run consults is decided per run by
+# _run_database, not here.
 function _load_dbs()
     path = _db_config_path()
-    cfg  = YAML.load_file(path)
-    db_name = get(get(cfg, "default", Dict()), "database", "pr2")
-    dbs     = ensure_databases(path)
-    db_name, dbs
+    ensure_databases(path)
 end
 
 @post "/api/v1/studies/{study}/pipeline" function(req, study::String)
@@ -485,7 +506,7 @@ end
         [(g, r) for g in _group_names(study) for r in _group_run_names(study, g)]
     ]
     db_cfg  = _db_config_path()
-    db_name, dbs = _load_dbs()
+    dbs     = _load_dbs()
 
     job = submit_job!("pipeline"; study) do
         merged_results = Vector{Any}(undef, length(run_pairs))
@@ -493,8 +514,7 @@ end
         Threads.@threads for i in eachindex(run_pairs)
             grp, run = run_pairs[i]
             try
-                merged_results[i] = _run_full_pipeline(study, run, db_cfg, dbs, db_name;
-                                                       group=grp)
+                merged_results[i] = _run_full_pipeline(study, run, db_cfg, dbs; group=grp)
             catch e
                 @error "Pipeline failed for run '$run' (group=$(repr(grp)))" exception=(e, catch_backtrace())
                 merged_results[i] = nothing
@@ -522,10 +542,10 @@ end
                                                           "Run '$run' not found")
     grp     = let g = _req_group(req); isnothing(g) ? _run_group(study, run) : g end
     db_cfg  = _db_config_path()
-    db_name, dbs = _load_dbs()
+    dbs     = _load_dbs()
 
     job = submit_job!("pipeline"; study, run) do
-        result = _run_full_pipeline(study, run, db_cfg, dbs, db_name; group=grp)
+        result = _run_full_pipeline(study, run, db_cfg, dbs; group=grp)
         # Gather this run's tool logs into its pipeline.log; see the study route.
         PipelineLog.finalise_log(_project_ctx(study, run, grp))
         result
@@ -544,10 +564,10 @@ end
     stage in ALL_RUNNABLE_STAGES || return json_error(400, "unknown_stage", "Unknown stage: $stage")
     grp     = let g = _req_group(req); isnothing(g) ? _run_group(study, run) : g end
     db_cfg  = _db_config_path()
-    db_name, dbs = _load_dbs()
+    dbs     = _load_dbs()
 
     job = submit_job!("stage"; study, run, stage) do
-        _run_stage(study, run, stage, db_cfg, dbs, db_name; group=grp)
+        _run_stage(study, run, stage, db_cfg, dbs; group=grp)
     end
 
     json(_job_to_namedtuple(job))

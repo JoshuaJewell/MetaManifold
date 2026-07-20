@@ -101,6 +101,17 @@ function _with_db_lock(f::Function, db_path::String, write::Bool)
     l = _db_lock(db_path)
     if write
         _acquire_write!(l)
+        # A reader's OS file handle on results.duckdb is released only when DuckDB's
+        # QueryResult finaliser runs, which in a long-lived server lags well behind the
+        # logical read: the readers/writer lock frees the read slot when the handler
+        # returns, but the handle lingers until the next garbage collection. That let a
+        # writer open the file read-write while stale read-only handles from finished
+        # readers were still mapped over the old block layout, and mutating the
+        # single-file database beneath them corrupted it ("Failed to load metadata
+        # pointer"). We hold the exclusive lock here, so no reader is running; a full
+        # collection forces those finaliser-bound handles closed before we touch the
+        # file. Writes are infrequent, so the cost sits off the hot read path.
+        GC.gc()
         try
             return f()
         finally

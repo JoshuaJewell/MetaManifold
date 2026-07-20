@@ -4,7 +4,7 @@ module PipelineLog
 #
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
-export pipeline_log, log_written, reset_tool_logs
+export pipeline_log, log_written, reset_tool_logs, log_command
 
     using SHA, Dates
     using ..PipelineTypes
@@ -47,6 +47,30 @@ export pipeline_log, log_written, reset_tool_logs
             open(io -> nothing, path, "w")
         end
         return nothing
+    end
+
+    ## Command capture
+    # A tool's output records what it said, never what it was asked. The resolved
+    # command line is the only witness to the latter, so it goes into the log
+    # before the tool runs and survives even a crash. The marker is fixed so that
+    # `grep '^\[MetaManifold\] cmd: '` recovers every command a run issued, across
+    # the shell tools and the embedded R stages alike.
+    const CMD_MARKER = "[MetaManifold]"
+
+    """
+        log_command(cmd_str, log_path)
+
+    Append the resolved command line to `log_path` behind the fixed marker,
+    before the tool runs. Both `Tools` (shell subprocesses) and the DADA2 remote
+    Rscript invocation call this; the local R stages emit the same marker through
+    their sink (see `DADA2._r_run_logged`).
+    """
+    function log_command(cmd_str::AbstractString, log_path::AbstractString)
+        open(log_path, "a") do io
+            println(io, CMD_MARKER, " command at ",
+                    Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
+            println(io, CMD_MARKER, " cmd: ", cmd_str)
+        end
     end
 
     ## The log registry

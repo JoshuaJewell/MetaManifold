@@ -97,34 +97,31 @@
         R"con <- file($log_path, open='at'); sink(con); sink(con, type='message')"
         try
             emit("Filtering and trimming reads")
+            # Bind the read-path vectors to R names so the logged command reads
+            # filterAndTrim(mm_in_fwd, ...) rather than dumping every path inline.
+            R"mm_in_fwd  <- $in_fwd"
+            R"mm_out_fwd <- $out_fwd"
             if ctx.mode == "paired"
-                R"""
-                filter_stats <- filterAndTrim(
-                    $in_fwd,  $out_fwd,
-                    $in_rev,  $out_rev,
-                    truncQ   = $(ft["trunc_q"]),
-                    truncLen = $trunc_len,
-                    maxEE    = $max_ee,
-                    minLen   = $(ft["min_len"]),
-                    maxN     = 0, # DADA2 requires no Ns
-                    matchIDs = $(ft["match_ids"]),
-                    rm.phix  = $(ft["rm_phix"]),
-                    verbose  = $verbose
-                )
-                """
+                R"mm_in_rev  <- $in_rev"
+                R"mm_out_rev <- $out_rev"
+                _r_run_logged(
+                    "filter_stats <- filterAndTrim(mm_in_fwd, mm_out_fwd, mm_in_rev, mm_out_rev" *
+                    ", truncQ=$(_r_lit(ft["trunc_q"]))" *
+                    ", truncLen=$(_r_lit(trunc_len))" *
+                    ", maxEE=$(_r_lit(max_ee))" *
+                    ", minLen=$(_r_lit(ft["min_len"]))" *
+                    ", maxN=0, matchIDs=$(_r_lit(ft["match_ids"]))" *
+                    ", rm.phix=$(_r_lit(ft["rm_phix"]))" *
+                    ", verbose=$(_r_lit(verbose)))")
             else
-                R"""
-                filter_stats <- filterAndTrim(
-                    $in_fwd, $out_fwd,
-                    truncQ   = $(ft["trunc_q"]),
-                    truncLen = $(trunc_len[1]),
-                    maxEE    = $(max_ee[1]),
-                    minLen   = $(ft["min_len"]),
-                    maxN     = 0, # DADA2 requires no Ns
-                    rm.phix  = $(ft["rm_phix"]),
-                    verbose  = $verbose
-                )
-                """
+                _r_run_logged(
+                    "filter_stats <- filterAndTrim(mm_in_fwd, mm_out_fwd" *
+                    ", truncQ=$(_r_lit(ft["trunc_q"]))" *
+                    ", truncLen=$(_r_lit(trunc_len[1]))" *
+                    ", maxEE=$(_r_lit(max_ee[1]))" *
+                    ", minLen=$(_r_lit(ft["min_len"]))" *
+                    ", maxN=0, rm.phix=$(_r_lit(ft["rm_phix"]))" *
+                    ", verbose=$(_r_lit(verbose)))")
             end
 
             emit("Plotting filtered quality profiles")

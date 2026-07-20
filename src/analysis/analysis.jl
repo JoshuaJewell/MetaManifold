@@ -790,10 +790,12 @@ function alpha_boxplot(groups::Vector{Tuple{String, Vector{String}, Vector{Int},
                                                        paired_samples=paired_samples)
             if annotate_significance
             anns = get!(panel_annotations, panel_idx, Dict{String,Any}[])
+            # Anchor to this panel's axis domain, not paper: a paper-referenced
+            # label cannot survive the frontend's per-metric axis renumbering,
+            # whereas a panel-anchored one remaps with its panel.
             push!(anns, Dict{String,Any}(
-                "xref" => "paper", "yref" => "paper",
-                "x" => 0.98,
-                "y" => panel_idx == 1 ? 0.98 : panel_idx == 2 ? 0.64 : 0.30,
+                "xref" => "$xax domain", "yref" => "$yax domain",
+                "x" => 0.98, "y" => 0.98,
                 "xanchor" => "right", "yanchor" => "top",
                 "text" => "$(paired_samples ? (length(unique(panel_labels)) == 2 ? "Paired Wilcoxon" : "Friedman") : "KW") $(_significance_stars(p_value))<br>$(_format_p_value(p_value))",
                 "showarrow" => false,

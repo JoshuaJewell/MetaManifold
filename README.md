@@ -205,8 +205,8 @@ Settings can be edited in the web UI (per-study, per-group, or per-run) or as YA
 | `config/defaults/` | Canonical defaults for every setting; do not edit |
 | `config/composition.yml` | Composition library: named taxonomic filters and the category sets that reference them |
 | `config/presets/` | Saved table-view filter presets, written from the Tables view |
-| `config/databases.yml` | Database URIs and optional local paths |
-| `config/primers.yml` | Primer sequences and pair definitions |
+| `config/databases.yml` | Database URIs and optional local paths. Editable from the Databases page under SYSTEM in the sidebar |
+| `config/primers.yml` | Primer sequences and pair definitions. Editable from the Primers page under SYSTEM in the sidebar |
 | `config/tools.yml` | Tool binary paths (cutadapt, FastQC, MultiQC, vsearch, cd-hit-est) |
 | `config/pipeline.yml` | Machine-level overrides (lowest user-editable precedence) |
 | `data/{name}/pipeline.yml` | Study-level overrides |
@@ -232,6 +232,12 @@ databases:
       local: ~
 ```
 
+Edit this on the Databases page under SYSTEM in the sidebar, or in the YAML directly. The page edits the shared cache directory (`dir`) and, per database, the dada2 and vsearch source URIs, a `local:` override for a file already on disk, `remote_path` (dada2 only) for a file already present on the remote taxonomy host, the ordered taxonomy `levels`, the `vsearch_format` parser selector, and the taxonomy `corrections`. Adding and removing a database is supported, not just retuning PR2. `vsearch_format` offers exactly `pr2` and `generic`: only the literal `pr2` selects pipe-separated parsing, and anything else is parsed generically.
+
+Removing or renaming a database, or changing its `levels`, is allowed, but the save reports which studies it affects. The warning resolves the real config cascade, so it names the studies that inherit the database without naming it, not merely those that mention it explicitly.
+
+Both formats of one database should come from the same reference release: the dual-classifier consensus compares DADA2 and VSEARCH labels for string equality, so references drawn from different releases score genuine agreements as disagreements. The editor warns on a version-token mismatch between the two URIs, but this is a filename heuristic and cannot warn for a database whose URIs carry no version.
+
 ### Defining primer pairs `primers.yml`
 
 Maps primer names to sequences and defines which forward/reverse sequences constitute a pair:
@@ -254,6 +260,10 @@ Pairs:
 ```
 
 Store all primer pairs in here and reference whichever combinations you need per project. Shared primers across pairs (same forward primer in two pairs) are automatically deduplicated in the `cutadapt` invocation since otherwise it complains a bit. If you need duplicates, you must create the same sequence under a different name.
+
+Edit this on the Primers page under SYSTEM in the sidebar, or in the YAML directly. The page adds and removes primers and composes pairs from them, validating each sequence against the IUPAC base set as you type. The whole document is validated before it lands on disk, so a pair naming a primer that does not exist is rejected and the file is left untouched.
+
+Pair names are referenced by `cutadapt.primer_pairs` in `pipeline.yml`. Removing or renaming a pair that a study still references is permitted, but the save reports which studies, groups, or runs named it, so the dangling reference is never silent. Renaming a primer carries its pairs with it automatically.
 
 ### Configuring cutadapt (`cutadapt:` in `pipeline.yml`)
 
@@ -562,7 +572,7 @@ The server exposes a REST API under `/api/v1/`. Key endpoint groups:
 | Groups         | `POST/DELETE /studies/{study}/groups`, `POST .../rename`                                                      | Create, rename, delete groups                                                            |
 | Runs           | `GET/POST/DELETE /studies/{study}/runs`, `POST .../rename`                                                    | List, create, rename, delete runs                                                        |
 | Config         | `GET/PATCH/DELETE .../config`, `GET .../config/overrides`                                                     | Read and edit config at any cascade level; list downstream overrides                     |
-| Primers        | `GET /primers`                                                                                                | List configured primer pairs                                                             |
+| Primers        | `GET /primers`, `GET /primers/document`, `PUT /primers`                                                       | List pair names; read and replace the whole primers document (validated before writing)  |
 | Pipeline       | `POST .../pipeline`, `POST .../stages/{stage}`                                                                | Launch full-study, single-run, or individual-stage jobs                                  |
 | Jobs           | `GET/DELETE /jobs`, `GET /jobs/{id}/logs`                                                                     | Monitor and cancel running pipeline jobs                                                 |
 | Events         | `GET /events`                                                                                                 | Server-sent event stream of real-time job and stage updates                              |
@@ -573,7 +583,7 @@ The server exposes a REST API under `/api/v1/`. Key endpoint groups:
 | Composition    | `GET /category-sets`, `POST .../composition/{source}/{build,query,distinct,analysis}`                         | Category-set listing and organism-composition tables and charts                          |
 | Annotation     | `GET/POST .../annotations/{source}/...`, `POST /funcdb/entries`, `PATCH .../{contamination,blast-assignment}` | Generate and query annotations, curate contamination and assignments, add FuncDB entries |
 | Filter presets | `GET/POST/DELETE /filter-presets`                                                                             | Save, list, delete reusable table filters                                                |
-| Databases      | `GET /databases`, `POST /databases/{key}/download`                                                            | List and download taxonomy databases                                                     |
+| Databases      | `GET /databases`, `GET /databases/document`, `PUT /databases`, `POST /databases/{key}/download`               | List and download taxonomy databases; read and replace the whole databases document (validated before writing, returns advisory warnings) |
 | System         | `POST /init`, `GET /capabilities`                                                                             | Initialise project directories; report server capabilities (e.g. R availability)         |
 
 All responses are JSON. Analysis endpoints return Plotly chart specifications.

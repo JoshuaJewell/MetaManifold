@@ -5,7 +5,8 @@ module Validation
 # This module is licensed under the GNU Affero General Public License version 3 (AGPLv3).
 
 export validate_environment, validate_project, ValidationError,
-       DENOVO_METHODS, SAFE_NAME_RE, is_safe_name
+       DENOVO_METHODS, SAFE_NAME_RE, is_safe_name, primer_document_errors,
+       database_document_errors
 
     using YAML, Logging
     using ..PipelineTypes
@@ -37,6 +38,12 @@ export validate_environment, validate_project, ValidationError,
     end
 
     _is_number(val) = val isa Number && !isnan(Float64(val))
+
+    # A section that is present but null is not the same as an absent one: `get`
+    # returns the default only when the key is absent, so a null section reaches
+    # the iteration as `nothing`. This function must never throw: it backs a write
+    # gate where a throw is a bare 500 rather than an actionable 400.
+    _seq(v) = v isa AbstractVector ? v : Any[]
 
     # IUPAC ambiguity codes -> regex character classes
     const _IUPAC = Dict(
@@ -80,7 +87,76 @@ export validate_environment, validate_project, ValidationError,
         end
     end
 
+    ## Database document rules
+    # The single source of truth for the STRUCTURE of a databases document, shared
+    # by the environment validator (_validate_databases) and
+    # DatabasesLibrary.validate. Operates on the native document shape (a
+    # databases: mapping of dir plus one entry per database). Returns
+    # human-readable errors; empty means valid. Never throws: every section and
+    # entry is type-checked before use.
+    #
+    # This is deliberately thin, and it holds structure only. Two other kinds of
+    # rule deliberately live elsewhere:
+    #
+    # Rules that would fail a databases.yml which validates today (an empty levels
+    # list, a misspelt vsearch_format) are WRITE-time rules and live in
+    # DatabasesLibrary.validate.
+    #
+    # Rules about the ENVIRONMENT the document is read in, of which "a local: path
+    # names a file that exists right now" is the only one, live in
+    # _validate_databases below. A document is not invalid for naming a file that
+    # has yet to arrive: the user may legitimately save the path first, and the
+    # pipeline reports the absence when it goes looking. Keeping such a rule here
+    # put it in the write gate, where one stale local: anywhere in the file
+    # rejected every save of the whole document, and where the 400 disclosed to
+    # any client whether an arbitrary path exists on the server.
+    function database_document_errors(cfg::AbstractDict)::Vector{String}
+        errors = String[]
+        dbs = get(cfg, "databases", nothing)
+        dbs isa AbstractDict ||
+            push!(errors, "databases.yml missing 'databases:' key")
+        errors
+    end
+
     ## Database Validation
+    # isfile does not merely answer the question: it throws on a NUL byte
+    # (embedded NULs are not allowed in C strings) and on a path whose parent
+    # directory cannot be read (EACCES). Both are reachable from a hand-edited
+    # databases.yml, and a throw out of the environment validator is an
+    # unexplained stack trace rather than a named error, so anything isfile cannot
+    # answer is treated as not-a-file.
+    function _is_named_file(p::AbstractString)
+        occursin('\0', p) && return false
+        try
+            isfile(p)
+        catch
+            false
+        end
+    end
+
+    # Whether each configured local: path names a file that exists. This is the
+    # environment rule the validator exists to report: it says the config points
+    # at something that is not there, which is true of the machine and not of the
+    # document. It is deliberately not a write-time rule; see the note above.
+    function _validate_database_files(errors::Vector{ValidationError}, ctx::String, cfg::AbstractDict)
+        dbs = get(cfg, "databases", nothing)
+        dbs isa AbstractDict || return
+        for (db_name, db_cfg) in dbs
+            # `dir` is the shared cache directory, not a database. It shares this
+            # namespace with the entries, which is why no database may be called dir.
+            string(db_name) == "dir" && continue
+            db_cfg isa AbstractDict || continue
+            for method in ("dada2", "vsearch")
+                mc = get(db_cfg, method, nothing)
+                mc isa AbstractDict || continue
+                local_path = get(mc, "local", nothing)
+                isnothing(local_path) && continue
+                _is_named_file(string(local_path)) ||
+                    _err(errors, ctx, "$db_name.$method.local: file not found: $local_path")
+            end
+        end
+    end
+
     function _validate_databases(errors::Vector{ValidationError}, databases_config_path::String)
         ctx = "databases"
         isfile(databases_config_path) || begin
@@ -92,23 +168,62 @@ export validate_environment, validate_project, ValidationError,
             _err(errors, ctx, "databases.yml is not a valid YAML mapping")
             return
         end
-        dbs = get(cfg, "databases", nothing)
-        dbs isa Dict || begin
-            _err(errors, ctx, "databases.yml missing 'databases:' key")
-            return
+        for msg in database_document_errors(cfg)
+            _err(errors, ctx, msg)
         end
-        for (db_name, db_cfg) in dbs
-            db_name == "dir" && continue
-            db_cfg isa Dict || continue
-            for method in ("dada2", "vsearch")
-                mc = get(db_cfg, method, nothing)
-                mc isa Dict || continue
-                local_path = get(mc, "local", nothing)
-                isnothing(local_path) && continue
-                isfile(string(local_path)) ||
-                    _err(errors, ctx, "$db_name.$method.local: file not found: $local_path")
+        _validate_database_files(errors, ctx, cfg)
+    end
+
+    ## Primer document rules
+    # The single source of truth for what a valid primers document is, shared by
+    # the environment validator (_validate_primers) and PrimersLibrary.validate.
+    # Operates on the native document shape (Forward/Reverse maps, Pairs a list of
+    # single-key mappings name => [fwd, rev]). Returns human-readable errors; empty
+    # means valid. Never throws: every section and entry is type-checked before use.
+    #
+    # Primer and pair names are deliberately NOT charset-checked. They are only
+    # ever lookup keys: get_primer_args resolves a pair name to its sequences, and
+    # only the sequence (checked against the IUPAC set below) reaches the cutadapt
+    # command. No name reaches a filesystem path, a shell, or a SQL identifier, so
+    # a charset rule here would reject a primers.yml that the pipeline runs
+    # perfectly well, and would buy nothing.
+    function primer_document_errors(cfg::AbstractDict)::Vector{String}
+        errors = String[]
+        fwd = get(cfg, "Forward", Dict())
+        rev = get(cfg, "Reverse", Dict())
+
+        fwd isa AbstractDict || push!(errors, "'Forward' must be a mapping of name -> sequence")
+        rev isa AbstractDict || push!(errors, "'Reverse' must be a mapping of name -> sequence")
+
+        valid_bases = Set("ACGTMRWSYKVHDBNacgtmrwsykvhdbn")
+        for (name, seq) in merge(fwd isa AbstractDict ? fwd : Dict(),
+                                 rev isa AbstractDict ? rev : Dict())
+            if !(seq isa AbstractString)
+                push!(errors, "primer '$name' sequence is not a string")
+                continue
+            end
+            bad = filter(c -> c ∉ valid_bases, seq)
+            isempty(bad) ||
+                push!(errors, "primer '$name' contains invalid bases: $(join(unique(bad)))")
+        end
+
+        pairs = get(cfg, "Pairs", [])
+        pairs isa AbstractVector || return errors
+        for entry in pairs
+            entry isa AbstractDict || continue
+            for (pair_name, members) in entry
+                if !(members isa AbstractVector && length(members) == 2)
+                    push!(errors, "pair '$pair_name' must list exactly [ForwardName, ReverseName]")
+                    continue
+                end
+                f_name, r_name = string(members[1]), string(members[2])
+                fwd isa AbstractDict && haskey(fwd, f_name) ||
+                    push!(errors, "pair '$pair_name' references unknown forward primer '$f_name'")
+                rev isa AbstractDict && haskey(rev, r_name) ||
+                    push!(errors, "pair '$pair_name' references unknown reverse primer '$r_name'")
             end
         end
+        errors
     end
 
     ## Primers Validation
@@ -123,37 +238,8 @@ export validate_environment, validate_project, ValidationError,
             _err(errors, ctx, "not a valid YAML mapping")
             return
         end
-        fwd   = get(cfg, "Forward", Dict())
-        rev   = get(cfg, "Reverse", Dict())
-        pairs = get(cfg, "Pairs",   [])
-
-        fwd isa Dict || _err(errors, ctx, "'Forward' must be a mapping of name -> sequence")
-        rev isa Dict || _err(errors, ctx, "'Reverse' must be a mapping of name -> sequence")
-
-        valid_bases = Set("ACGTMRWSYKVHDBNacgtmrwsykvhdbn")
-        for (name, seq) in merge(fwd isa Dict ? fwd : Dict(), rev isa Dict ? rev : Dict())
-            seq isa String || begin
-                _err(errors, ctx, "primer '$name' sequence is not a string"); continue
-            end
-            bad = filter(c -> c ∉ valid_bases, seq)
-            isempty(bad) ||
-                _err(errors, ctx, "primer '$name' contains invalid bases: $(join(unique(bad)))")
-        end
-
-        pairs isa Vector || return
-        for entry in pairs
-            entry isa Dict || continue
-            for (pair_name, members) in entry
-                members isa Vector && length(members) == 2 || begin
-                    _err(errors, ctx, "pair '$pair_name' must list exactly [ForwardName, ReverseName]")
-                    continue
-                end
-                f_name, r_name = string(members[1]), string(members[2])
-                fwd isa Dict && haskey(fwd, f_name) ||
-                    _err(errors, ctx, "pair '$pair_name' references unknown forward primer '$f_name'")
-                rev isa Dict && haskey(rev, r_name) ||
-                    _err(errors, ctx, "pair '$pair_name' references unknown reverse primer '$r_name'")
-            end
+        for m in primer_document_errors(cfg)
+            _err(errors, ctx, m)
         end
     end
 

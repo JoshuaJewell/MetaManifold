@@ -67,8 +67,9 @@
                 denovo_method isa AbstractString && denovo_method in Validation.DENOVO_METHODS ||
                     error("asv.denovo_method must be one of $(join(Validation.DENOVO_METHODS, ", ")) " *
                           "(got: $(repr(denovo_method)))")
+                _r_run_logged("seq_table_nochim <- removeBimeraDenovo(seq_table, " *
+                              "method=$(_r_lit(denovo_method)), verbose=$(_r_lit(verbose)))")
                 R"""
-                seq_table_nochim <- removeBimeraDenovo(seq_table, method=$denovo_method, verbose=$verbose)
                 nochim_pct <- sum(seq_table_nochim) / sum(seq_table) * 100
                 message("  Chimeric reads removed: ", round(100 - nochim_pct, 2),
                         "% | Retained: ", round(nochim_pct, 2), "%")

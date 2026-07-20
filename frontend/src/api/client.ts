@@ -14,6 +14,8 @@ import type {
   VennRequest, VennResult,
   ChartCosmeticsMap, ChartCosmeticsPatch,
   CompositionFilter, CompositionSet, CompositionLibraryDoc,
+  PrimerDocument, PrimerSaveResult,
+  DatabaseDocument, DatabaseSaveResult,
 } from './types'
 
 // Base URL for the backend API. Empty string means same-origin.
@@ -71,6 +73,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const get  = <T>(path: string)                       => request<T>(path)
 const post = <T>(path: string, body?: unknown)       => request<T>(path, { method: 'POST',  body: body !== undefined ? JSON.stringify(body) : undefined })
 const patch = <T>(path: string, body?: unknown)      => request<T>(path, { method: 'PATCH', body: body !== undefined ? JSON.stringify(body) : undefined })
+const put  = <T>(path: string, body?: unknown)       => request<T>(path, { method: 'PUT',  body: body !== undefined ? JSON.stringify(body) : undefined })
 const del  = <T>(path: string)                       => request<T>(path, { method: 'DELETE' })
 
 /** Append ?group=X query parameter when group is provided. */
@@ -177,7 +180,9 @@ export const api = {
   },
 
   primers: {
-    list: () => get<string[]>('/api/v1/primers'),
+    list:     () => get<string[]>('/api/v1/primers'),
+    document: () => get<PrimerDocument>('/api/v1/primers/document'),
+    save:     (doc: PrimerDocument) => put<PrimerSaveResult>('/api/v1/primers', doc),
   },
 
   config: {
@@ -311,5 +316,7 @@ export const api = {
   databases: {
     list:     ()             => get<DatabaseEntry[]>('/api/v1/databases'),
     download: (key: string)  => post<Job>(`/api/v1/databases/${key}/download`),
+    document: () => get<DatabaseDocument>('/api/v1/databases/document'),
+    save:     (doc: DatabaseDocument) => put<DatabaseSaveResult>('/api/v1/databases', doc),
   },
 }

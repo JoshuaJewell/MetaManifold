@@ -45,13 +45,21 @@
             emit("Learning error rates")
             R"set.seed($seed)"
 
-            ctx.mode != "reverse" ?
-                R"fwd_errors <- learnErrors($fwd_out, nbases=$nbases, MAX_CONSIST=$max_con, verbose=$verbose)" :
+            if ctx.mode != "reverse"
+                R"mm_fwd <- $fwd_out"
+                _r_run_logged("fwd_errors <- learnErrors(mm_fwd, nbases=$(_r_lit(nbases)), " *
+                              "MAX_CONSIST=$(_r_lit(max_con)), verbose=$(_r_lit(verbose)))")
+            else
                 R"fwd_errors <- NULL"
+            end
 
-            ctx.mode != "forward" ?
-                R"rev_errors <- learnErrors($rev_out, nbases=$nbases, MAX_CONSIST=$max_con, verbose=$verbose)" :
+            if ctx.mode != "forward"
+                R"mm_rev <- $rev_out"
+                _r_run_logged("rev_errors <- learnErrors(mm_rev, nbases=$(_r_lit(nbases)), " *
+                              "MAX_CONSIST=$(_r_lit(max_con)), verbose=$(_r_lit(verbose)))")
+            else
                 R"rev_errors <- NULL"
+            end
 
             error_pdf = joinpath(ctx.dirs["Figures"], "error_rates.pdf")
             R"plot_error_rates(fwd_errors, rev_errors, $error_pdf)"
@@ -116,30 +124,36 @@
             R"set.seed($(ctx.seed))"
             pool_method = ctx.cfg["dada"]["pool_method"]
 
-            ctx.mode != "reverse" ?
-                R"dada_fwd <- dada($fwd_out, err=fwd_errors, pool=$pool_method, verbose=$verbose)" :
-                R"dada_fwd <- NULL"
+            # Bind the read-path vectors once; the dada and mergePairs commands
+            # below reference these R names rather than inlining every path.
+            ctx.mode != "reverse" && R"mm_fwd <- $fwd_out"
+            ctx.mode != "forward" && R"mm_rev <- $rev_out"
 
-            ctx.mode != "forward" ?
-                R"dada_rev <- dada($rev_out, err=rev_errors, pool=$pool_method, verbose=$verbose)" :
+            if ctx.mode != "reverse"
+                _r_run_logged("dada_fwd <- dada(mm_fwd, err=fwd_errors, " *
+                              "pool=$(_r_lit(pool_method)), verbose=$(_r_lit(verbose)))")
+            else
+                R"dada_fwd <- NULL"
+            end
+
+            if ctx.mode != "forward"
+                _r_run_logged("dada_rev <- dada(mm_rev, err=rev_errors, " *
+                              "pool=$(_r_lit(pool_method)), verbose=$(_r_lit(verbose)))")
+            else
                 R"dada_rev <- NULL"
+            end
 
             emit("Building sequence table")
             if ctx.mode == "paired"
                 min_overlap   = ctx.cfg["merge"]["min_overlap"]
                 max_mismatch  = ctx.cfg["merge"]["max_mismatch"]
                 trim_overhang = ctx.cfg["merge"]["trim_overhang"]
-                R"""
-                merged <- mergePairs(
-                    dada_fwd, $fwd_out,
-                    dada_rev, $rev_out,
-                    minOverlap   = $min_overlap,
-                    maxMismatch  = $max_mismatch,
-                    trimOverhang = $trim_overhang,
-                    verbose      = $verbose
-                )
-                seq_table <- makeSequenceTable(merged)
-                """
+                _r_run_logged("merged <- mergePairs(dada_fwd, mm_fwd, dada_rev, mm_rev" *
+                              ", minOverlap=$(_r_lit(min_overlap))" *
+                              ", maxMismatch=$(_r_lit(max_mismatch))" *
+                              ", trimOverhang=$(_r_lit(trim_overhang))" *
+                              ", verbose=$(_r_lit(verbose)))")
+                R"seq_table <- makeSequenceTable(merged)"
             else
                 R"""
                 merged    <- NULL
@@ -213,7 +227,8 @@
             band_max = get(ctx.cfg["asv"], "band_size_max", nothing)
             if !isnothing(band_min) && !isnothing(band_max)
                 emit("Filtering by length: $band_min-$band_max bp")
-                R"seq_table <- filter_by_length(seq_table, $band_min, $band_max)"
+                _r_run_logged("seq_table <- filter_by_length(seq_table, " *
+                              "$(_r_lit(band_min)), $(_r_lit(band_max)))")
                 len_filt_pdf = joinpath(ctx.dirs["Figures"], "length_distribution_filtered.pdf")
                 R"""
                 if (sum(seq_table) > 0) {

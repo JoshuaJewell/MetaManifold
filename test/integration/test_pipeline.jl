@@ -119,6 +119,16 @@
         @test isfile(asvs.fasta) && filesize(asvs.fasta) > 0
         @test isfile(asvs.count_table) && filesize(asvs.count_table) > 0
 
+        # Provenance: each DADA2 R stage records the exact call it issued, behind
+        # the same marker the shell tools use, recoverable by a single grep.
+        dada2_logs = joinpath(project.dir, "dada2", "Logs")
+        for stage_log in ("filter_trim.log", "learn_errors.log", "denoise.log",
+                          "chimera_removal.log")
+            p = joinpath(dada2_logs, stage_log)
+            @test isfile(p)
+            @test any(l -> startswith(l, "[MetaManifold] cmd: R> "), readlines(p))
+        end
+
         # Stage 3: vsearch taxonomy (ASV + OTU in parallel)
         asv_tax_task = Threads.@spawn vsearch(project, asvs, dbs_loaded[vsearch_key])
         otu_tax_task = isnothing(otus) ? nothing :
