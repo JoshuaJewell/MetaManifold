@@ -14,13 +14,13 @@ jobs:
   test:
     name: Julia ${{ matrix.julia-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The repository's root .Rprofile sources renv/activate.R, so every Rscript
-    # launched from the checkout would auto-activate renv and rewrite the library
-    # paths. That diverts the pinned installs below (all made with lib=.Library)
-    # into renv's sandbox, where the verification step cannot find them, and the
-    # step fails with "dada2 failed to install" even though the build succeeded.
-    # renv is a local-development convenience; CI installs into the system library
-    # and reaches it through R_LIBS_SITE, so the autoloader is disabled job-wide.
+    # The repository's root .Rprofile sources renv/activate.R, so R started from
+    # the checkout auto-activates renv and rewrites the library paths. renv is a
+    # local-development convenience; CI installs into the system library and
+    # reaches it through R_LIBS_SITE, so the autoloader is switched off here.
+    # This variable covers the unprivileged R that Julia embeds through RCall.
+    # It cannot cover the installs themselves, which run under sudo: sudo resets
+    # the environment, so those commands pass --no-init-file instead.
     env:
       RENV_CONFIG_AUTOLOADER_ENABLED: "FALSE"
     strategy:
@@ -96,12 +96,18 @@ jobs:
       - name: Install R system dependencies
         run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
 
+      # --no-init-file stops R sourcing the repository's .Rprofile, and with it the
+      # renv autoloader. Without it renv redirects these installs into its sandbox
+      # under root's cache rather than .Library, and the check below then reports
+      # "dada2 failed to install" despite the package having built cleanly. The
+      # flag is used rather than the environment variable above because sudo
+      # resets the environment before R ever sees it.
       - name: Install R packages
         run: |
-          sudo Rscript -e 'install.packages("BiocManager", repos="https://cloud.r-project.org", lib=.Library)'
-          sudo Rscript -e 'BiocManager::install("dada2", ask=FALSE, lib=.Library)'
-          sudo Rscript -e 'install.packages(c("vegan", "dplyr"), repos="https://cloud.r-project.org", lib=.Library)'
-          Rscript -e 'for (pkg in c("dada2","vegan","dplyr")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
+          sudo Rscript --no-init-file -e 'install.packages("BiocManager", repos="https://cloud.r-project.org", lib=.Library)'
+          sudo Rscript --no-init-file -e 'BiocManager::install("dada2", ask=FALSE, lib=.Library)'
+          sudo Rscript --no-init-file -e 'install.packages(c("vegan", "dplyr"), repos="https://cloud.r-project.org", lib=.Library)'
+          Rscript --no-init-file -e 'for (pkg in c("dada2","vegan","dplyr")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
 
       - name: Install cutadapt
         run: pip install "$CUTADAPT_SPEC"
