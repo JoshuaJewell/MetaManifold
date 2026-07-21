@@ -96,18 +96,22 @@ jobs:
       - name: Install R system dependencies
         run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
 
-      # --no-init-file stops R sourcing the repository's .Rprofile, and with it the
-      # renv autoloader. Without it renv redirects these installs into its sandbox
-      # under root's cache rather than .Library, and the check below then reports
-      # "dada2 failed to install" despite the package having built cleanly. The
-      # flag is used rather than the environment variable above because sudo
-      # resets the environment before R ever sees it.
+      # The R packages are restored from renv.lock, the same pin a developer restores
+      # from, rather than resolved against whatever the repositories serve that day.
+      # Asking for a bare package name pins nothing: a Bioconductor release is frozen,
+      # so dada2 and its kin held still, but CRAN publishes only its newest revision,
+      # so vegan silently moved off the pinned 2.7-3 and test_provenance caught the
+      # drift. Restoring into .Library keeps the system library that the RCall steps
+      # and R_LIBS_SITE below expect, and renv is invoked explicitly here rather than
+      # left to activate itself. --no-init-file stops R sourcing the repository's
+      # .Rprofile, and with it the renv autoloader, which would otherwise rebind
+      # .Library to its own sandbox under root's cache; the flag is used rather than
+      # the environment variable above because sudo resets the environment first.
       - name: Install R packages
         run: |
-          sudo Rscript --no-init-file -e 'install.packages("BiocManager", repos="https://cloud.r-project.org", lib=.Library)'
-          sudo Rscript --no-init-file -e 'BiocManager::install("dada2", ask=FALSE, lib=.Library)'
-          sudo Rscript --no-init-file -e 'install.packages(c("vegan", "dplyr"), repos="https://cloud.r-project.org", lib=.Library)'
-          Rscript --no-init-file -e 'for (pkg in c("dada2","vegan","dplyr")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
+          sudo Rscript --no-init-file -e 'install.packages(c("renv", "BiocManager"), repos="https://cloud.r-project.org", lib=.Library)'
+          sudo Rscript --no-init-file -e 'renv::restore(project=".", library=.Library, prompt=FALSE)'
+          Rscript --no-init-file -e 'for (pkg in c("dada2","Biostrings","ShortRead","vegan","dplyr")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
 
       - name: Install cutadapt
         run: pip install "$CUTADAPT_SPEC"
